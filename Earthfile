@@ -15,12 +15,20 @@ devcontainer-library-scripts:
     RUN curl -fsSLO https://raw.githubusercontent.com/microsoft/vscode-dev-containers/main/script-library/docker-debian.sh
     SAVE ARTIFACT --keep-ts *.sh AS LOCAL .devcontainer/library-scripts/
 
-# https://github.com/docker-library/mysql/blob/master/5.7/Dockerfile.debian
-mysql-public-key:
-    ARG KEY=B7B3B788A8D3785C
-    RUN gpg --batch --keyserver keyserver.ubuntu.com --recv-keys "$KEY"
-    RUN gpg --batch --armor --export "$KEY" > mysql-public-key
-    SAVE ARTIFACT mysql-public-key AS LOCAL .devcontainer/mysql-public-key
+# https://github.com/docker-library/mysql/blob/master/8.0/Dockerfile.debian
+mysql.gpg:
+    FROM alpine:3.22
+    RUN apk add gnupg
+    WORKDIR /tmp
+    RUN set -eux; \
+        key='BCA4 3417 C3B4 85DD 128E C6D4 B7B3 B788 A8D3 785C'; \
+        export GNUPGHOME="$(mktemp -d)"; \
+        gpg --batch --keyserver keyserver.ubuntu.com --recv-keys "$key"; \
+        mkdir -p /etc/apt/keyrings; \
+        gpg --batch --export "$key" > mysql.gpg; \
+        gpgconf --kill all; \
+        rm -rf "$GNUPGHOME"
+    SAVE ARTIFACT mysql.gpg AS LOCAL .devcontainer/mysql.gpg
 
 neko:
     ARG FILENAME=neko_2022-07-19_master_81c4dce.tar.gz
@@ -55,8 +63,7 @@ devcontainer-base:
         && apt-get autoremove -y && apt-get clean -y && rm -rf /var/lib/apt/lists/* /tmp/library-scripts/
 
     # see +mysql-public-key
-    COPY .devcontainer/mysql-public-key /tmp/mysql-public-key
-    RUN apt-key add /tmp/mysql-public-key
+    COPY .devcontainer/mysql.gpg /etc/apt/keyrings/mysql.gpg
 
     # Configure apt and install packages
     RUN set -ex; apt-get update \
@@ -81,7 +88,7 @@ devcontainer-base:
         && apt-get install -y nodejs=18.* \
         # Install mysql-client
         # https://github.com/docker-library/mysql/blob/master/5.7/Dockerfile.debian
-        && echo 'deb http://repo.mysql.com/apt/ubuntu/ bionic mysql-5.7' > /etc/apt/sources.list.d/mysql.list \
+        && echo 'deb [ signed-by=/etc/apt/keyrings/mysql.gpg ] http://repo.mysql.com/apt/ubuntu/ bionic mysql-5.7' > /etc/apt/sources.list.d/mysql.list \
         && apt-get update \
         && apt-get -y install mysql-client=5.7.* \
         # install kubectl
