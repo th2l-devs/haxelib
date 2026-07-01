@@ -93,43 +93,74 @@ class Cli {
 		return s.toString();
 	}
 
+	static inline final BAR_WIDTH = 24;
+	static var indeterminateFrame = 0;
+
+	static function formatBytes(bytes:Int):String {
+		final unit = Unit.getUnitFor(bytes);
+		return '${Unit.convertFromBytes(bytes, unit)} $unit';
+	}
+
+	static function formatBytesPair(cur:Int, max:Int):String {
+		final unit = Unit.getUnitFor(max);
+		return '${Unit.convertFromBytes(cur, unit)}/${Unit.convertFromBytes(max, unit)} $unit';
+	}
+
+	static function progressBar(fraction:Float):String {
+		if (fraction < 0) fraction = 0;
+		if (fraction > 1) fraction = 1;
+		final filled = Std.int(fraction * BAR_WIDTH);
+		final buf = new StringBuf();
+		buf.addChar("[".code);
+		for (i in 0...BAR_WIDTH)
+			buf.addChar(if (i < filled) "=".code else if (i == filled) ">".code else " ".code);
+		buf.addChar("]".code);
+		return buf.toString();
+	}
+
+	static function indeterminateBar():String {
+		final span = BAR_WIDTH - 1;
+		final pos = indeterminateFrame++ % (span * 2);
+		final at = pos <= span ? pos : span * 2 - pos;
+		final buf = new StringBuf();
+		buf.addChar("[".code);
+		for (i in 0...BAR_WIDTH)
+			buf.addChar(if (i == at) "=".code else " ".code);
+		buf.addChar("]".code);
+		return buf.toString();
+	}
+
 	public static function printInstallStatus(_, current:Int, total:Int) {
 		Sys.stdout().writeString("\033[2K\r");
 		if (current != total) {
-			final percent = Std.int((current / total) * 100);
-			Sys.print('${current + 1}/$total ($percent%)');
+			final fraction = current / total;
+			final percent = Std.int(fraction * 100);
+			Sys.print('${progressBar(fraction)} ${current + 1}/$total ($percent%)');
 		}
 	}
 
 	public static function printUploadStatus(pos:Int, total:Int) {
-		Sys.print("\033[2K\r" + Std.int((pos * 100.0) / total) + "%");
+		final fraction = pos / total;
+		Sys.print("\033[2K\r" + progressBar(fraction) + " " + Std.int(fraction * 100) + "%");
 	}
 
-	public static function printDownloadStatus(_:String, finished:Bool, cur:Int, max:Null<Int>, downloaded:Int, time:Float) {
+	public static function printDownloadStatus(label:String, finished:Bool, cur:Int, max:Null<Int>, downloaded:Int, time:Float) {
 		Sys.stdout().writeString("\033[2K\r");
 		// clear line and return to beginning
+		final speed = time > 0 ? downloaded / time : 0;
+		final speedStr = formatBytes(Std.int(speed)) + "/s";
+		final elapsed = Std.int(time * 10) / 10;
+
 		if (finished) {
-			final rawSpeed = (downloaded / time) / 1000;
-			final speed = Std.int(rawSpeed * 10) / 10;
-			final time = Std.int(time * 10) / 10;
-			final unit = Unit.getUnitFor(downloaded);
-
-			final readableBytes = Unit.convertFromBytes(downloaded, unit);
-
-			Sys.println('Download complete: ${readableBytes}${unit} in ${time}s (${speed}KB/s)');
+			Sys.println('$label — ${formatBytes(downloaded)} in ${elapsed}s ($speedStr)');
 		} else if (max == null) {
-			final unit = Unit.getUnitFor(cur);
-			final curReadable = Unit.convertFromBytes(cur, unit);
-
-			Sys.print('${curReadable} $unit');
+			// total size unknown: show a moving indicator with what we have so far
+			Sys.print('$label ${indeterminateBar()} ${formatBytes(cur)}  $speedStr  ${elapsed}s');
 		} else {
-			final unit = Unit.getUnitFor(max);
-			final curReadable = Unit.convertFromBytes(cur, unit);
-
-			final maxReadable = Unit.convertFromBytes(max, unit);
-			final percentage = Std.int((cur * 100.0) / max);
-
-			Sys.print('${curReadable} $unit / ${maxReadable} $unit ($percentage%)');
+			final fraction = cur / max;
+			final percent = Std.int(fraction * 100);
+			final eta = speed > 0 ? Std.int(((max - cur) / speed) * 10) / 10 : 0;
+			Sys.print('$label ${progressBar(fraction)} $percent%  ${formatBytesPair(cur, max)}  $speedStr  eta ${eta}s');
 		}
 	}
 

@@ -887,9 +887,11 @@ class Installer {
 			});
 
 			// TODO check different urls as well
-			if (vcsData.branch != null && (!wasUpdated || currentData.branch != vcsData.branch)) {
+			// only re-clone when the requested branch/tag actually differs from what is
+			// installed; reinstalling the same ref should not prompt to overwrite
+			if (vcsData.branch != null && currentData.branch != vcsData.branch) {
 				final currentBranchStr = currentData.branch != null ? currentData.branch : "<unspecified>";
-				if (!userInterface.confirm('Overwrite branch: "$currentBranchStr" with "${vcsData.branch}"')) {
+				if (!userInterface.confirm('Overwrite "$currentBranchStr" with "${vcsData.branch}"')) {
 					userInterface.log('Library $library $id repository remains at "$currentBranchStr"');
 					return;
 				}
