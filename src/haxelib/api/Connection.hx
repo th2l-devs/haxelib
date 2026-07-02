@@ -282,11 +282,20 @@ class Connection {
 		if (currentSize > 0)
 			h.addHeader("range", 'bytes=$currentSize-');
 
-		final progress = if (downloadProgress == null) out
-			else new ProgressOut(out, currentSize, downloadProgress);
-
 		var httpStatus = -1;
 		var redirectedLocation = null;
+
+		// when the response is a redirect, its (empty) body still goes through
+		// the progress stream; suppress those events so that no spurious
+		// "download complete" is reported before the actual download
+		final filteredProgress:Null<DownloadProgress> = if (downloadProgress == null) null
+			else (finished, cur, max, downloaded, time) -> {
+				if (redirectedLocation == null)
+					downloadProgress(finished, cur, max, downloaded, time);
+			};
+
+		final progress = if (filteredProgress == null) out
+			else new ProgressOut(out, currentSize, filteredProgress);
 		h.onStatus = function(status) {
 			httpStatus = status;
 			switch (httpStatus) {

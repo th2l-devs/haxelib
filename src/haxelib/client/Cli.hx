@@ -93,74 +93,105 @@ class Cli {
 		return s.toString();
 	}
 
-	static inline final BAR_WIDTH = 24;
-	static var indeterminateFrame = 0;
+	/** Width (in characters) of the drawn progress bars. **/
+	static inline final BAR_WIDTH = 30;
 
+	/** Frame counter used to animate the spinner shown for unknown totals. **/
+	static var spinnerFrame = 0;
+
+	static final SPINNER_CHARS = ["|", "/", "-", "\\"];
+
+	/** Formats a byte count as a human readable string, e.g. `2.1 MB`. **/
 	static function formatBytes(bytes:Int):String {
 		final unit = Unit.getUnitFor(bytes);
 		return '${Unit.convertFromBytes(bytes, unit)} $unit';
 	}
 
+	/** Formats `cur`/`max` bytes sharing a single unit, e.g. `2.1/4.5 MB`. **/
 	static function formatBytesPair(cur:Int, max:Int):String {
 		final unit = Unit.getUnitFor(max);
 		return '${Unit.convertFromBytes(cur, unit)}/${Unit.convertFromBytes(max, unit)} $unit';
 	}
 
+	/** Formats a duration in seconds as `m:ss`, e.g. `0:07` or `2:41`. **/
+	static function formatTime(seconds:Float):String {
+		var total = Std.int(seconds);
+		if (total < 0)
+			total = 0;
+		final mins = Std.int(total / 60);
+		final secs = total % 60;
+		return '$mins:' + (secs < 10 ? '0$secs' : '$secs');
+	}
+
+	/** Renders a `[#########---------]` style bar filled to `fraction` (0-1). **/
 	static function progressBar(fraction:Float):String {
 		if (fraction < 0) fraction = 0;
 		if (fraction > 1) fraction = 1;
-		final filled = Std.int(fraction * BAR_WIDTH);
+		final filled = Math.round(fraction * BAR_WIDTH);
 		final buf = new StringBuf();
 		buf.addChar("[".code);
 		for (i in 0...BAR_WIDTH)
-			buf.addChar(if (i < filled) "=".code else if (i == filled) ">".code else " ".code);
+			buf.addChar(if (i < filled) "#".code else "-".code);
 		buf.addChar("]".code);
 		return buf.toString();
 	}
 
-	static function indeterminateBar():String {
-		final span = BAR_WIDTH - 1;
-		final pos = indeterminateFrame++ % (span * 2);
-		final at = pos <= span ? pos : span * 2 - pos;
-		final buf = new StringBuf();
-		buf.addChar("[".code);
-		for (i in 0...BAR_WIDTH)
-			buf.addChar(if (i == at) "=".code else " ".code);
-		buf.addChar("]".code);
-		return buf.toString();
+	/** Returns the next frame of the spinner used when the total is unknown. **/
+	static function spinner():String {
+		return SPINNER_CHARS[spinnerFrame++ % SPINNER_CHARS.length];
+	}
+
+	/** Length of the last status line drawn, used to blank out leftovers. **/
+	static var lastStatusLength = 0;
+
+	/**
+		Redraws the current console line with `line`.
+
+		Uses `\r` + space padding rather than ANSI escape codes, so it works
+		on consoles without VT support (e.g. legacy Windows conhost).
+	**/
+	static function reprintLine(line:String) {
+		Sys.print("\r" + StringTools.rpad(line, " ", lastStatusLength));
+		lastStatusLength = line.length;
+	}
+
+	/** Like `reprintLine`, but terminates the line: further output starts fresh. **/
+	static function finishLine(line:String) {
+		Sys.println("\r" + StringTools.rpad(line, " ", lastStatusLength));
+		lastStatusLength = 0;
 	}
 
 	public static function printInstallStatus(_, current:Int, total:Int) {
-		Sys.stdout().writeString("\033[2K\r");
 		if (current != total) {
 			final fraction = current / total;
 			final percent = Std.int(fraction * 100);
-			Sys.print('${progressBar(fraction)} ${current + 1}/$total ($percent%)');
+			reprintLine('  ${progressBar(fraction)} $percent% (${current + 1}/$total files)');
+		} else {
+			// clear the bar
+			reprintLine("");
+			Sys.print("\r");
 		}
 	}
 
 	public static function printUploadStatus(pos:Int, total:Int) {
 		final fraction = pos / total;
-		Sys.print("\033[2K\r" + progressBar(fraction) + " " + Std.int(fraction * 100) + "%");
+		reprintLine('  ${progressBar(fraction)} ${Std.int(fraction * 100)}% ${formatBytesPair(pos, total)}');
 	}
 
 	public static function printDownloadStatus(label:String, finished:Bool, cur:Int, max:Null<Int>, downloaded:Int, time:Float) {
-		Sys.stdout().writeString("\033[2K\r");
-		// clear line and return to beginning
 		final speed = time > 0 ? downloaded / time : 0;
 		final speedStr = formatBytes(Std.int(speed)) + "/s";
-		final elapsed = Std.int(time * 10) / 10;
 
 		if (finished) {
-			Sys.println('$label — ${formatBytes(downloaded)} in ${elapsed}s ($speedStr)');
+			finishLine('$label: ${formatBytes(downloaded)} in ${formatTime(time)} ($speedStr)');
 		} else if (max == null) {
-			// total size unknown: show a moving indicator with what we have so far
-			Sys.print('$label ${indeterminateBar()} ${formatBytes(cur)}  $speedStr  ${elapsed}s');
+			// total size unknown: spinner + running byte count so it visibly moves
+			reprintLine('$label ${spinner()} ${formatBytes(cur)} $speedStr ${formatTime(time)}');
 		} else {
 			final fraction = cur / max;
 			final percent = Std.int(fraction * 100);
-			final eta = speed > 0 ? Std.int(((max - cur) / speed) * 10) / 10 : 0;
-			Sys.print('$label ${progressBar(fraction)} $percent%  ${formatBytesPair(cur, max)}  $speedStr  eta ${eta}s');
+			final etaStr = speed > 0 ? formatTime((max - cur) / speed) : "-:--";
+			reprintLine('$label ${progressBar(fraction)} $percent% ${formatBytesPair(cur, max)} $speedStr eta $etaStr');
 		}
 	}
 

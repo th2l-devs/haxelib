@@ -75,6 +75,7 @@ enum VcsError {
 	CantCheckout(vcs:Vcs, ref:String, stderr:String);
 	CommandFailed(vcs:Vcs, code:Int, stdout:String, stderr:String);
 	SubmoduleError(vcs:Vcs, repo:String, stderr:String);
+	CommandTimedOut(vcs:Vcs, seconds:Int);
 }
 
 /** Base implementation of `IVcs` for `Git` and `Mercurial` to extend. **/
@@ -82,6 +83,18 @@ abstract class Vcs implements IVcs {
 	/** If set to true, recursive cloning is disabled **/
 	public final executable:String;
 	public var available(get, null):Bool;
+
+	/**
+		If set, long running commands (clone/fetch) stream their live output
+		(e.g. git's progress meter) to this function as it is produced.
+	**/
+	public var progressOutput:Null<(chunk:String) -> Void> = null;
+
+	/**
+		Number of seconds a streamed command may stay completely silent before
+		it is considered stalled and gets killed. `0` disables the watchdog.
+	**/
+	public var stallTimeout = 60;
 
 	private var availabilityChecked = false;
 
@@ -205,6 +218,144 @@ abstract class Vcs implements IVcs {
 		p.close();
 		return ret;
 	}
+
+	/**
+		Runs a long-running command, streaming its stderr live through
+		`progressOutput` (if set) so the user can see the vcs' own progress.
+
+		A watchdog kills the process if it produces no output at all for
+		`stallTimeout` seconds, in which case `CommandTimedOut` is thrown.
+	**/
+	final function runStreamed(args:Array<String>, strict = false):{
+		code:Int,
+		out:String,
+		err:String,
+	} {
+		inline function print(msg)
+			if (msg != "")
+				debugLog(msg);
+
+		print("# Running command: " + executable + " " + args.toString() + "\n");
+
+		final proc = commandStreamed(executable, args, progressOutput, stallTimeout);
+
+		if (proc.timedOut)
+			throw VcsError.CommandTimedOut(this, stallTimeout);
+		if (strict && proc.code != 0)
+			throw VcsError.CommandFailed(this, proc.code, proc.out, proc.err);
+
+		print(proc.out);
+		print(proc.err);
+		print('# Exited with code ${proc.code}\n');
+
+		return proc;
+	}
+
+	/**
+		Kills `p` and any child processes it has spawned (e.g. git spawns
+		git-remote-https, which would otherwise keep the pipes open).
+	**/
+	static function killProcessTree(p:sys.io.Process):Void {
+		final pid = try Std.string(p.getPid()) catch (_:Dynamic) null;
+		if (pid != null) {
+			// use OS facilities first: they can kill the whole process tree
+			final code =
+				if (Sys.systemName() == "Windows")
+					command("taskkill", ["/F", "/T", "/PID", pid]).code;
+				else
+					command("kill", ["-9", pid]).code;
+			if (code == 0)
+				return;
+		}
+		// fall back to the direct kill (may leave child processes behind)
+		try p.kill() catch (_:Dynamic) {};
+	}
+
+	static function commandStreamed(cmd:String, args:Array<String>, echo:Null<(chunk:String) -> Void>, stallTimeout:Int):{
+		code:Int,
+		out:String,
+		err:String,
+		timedOut:Bool,
+	} {
+		final p = try {
+			new sys.io.Process(cmd, args);
+		} catch (e:Dynamic) {
+			return {
+				code: -1,
+				out: "",
+				err: Std.string(e),
+				timedOut: false
+			}
+		};
+		// just in case process hangs waiting for stdin
+		#if neko
+		if (!((untyped __dollar__version()) <= 240 && Sys.systemName() == "Windows"))
+		#end
+			p.stdin.close();
+
+		final streamsLock = new sys.thread.Lock();
+		final state = {
+			lastActivity: haxe.Timer.stamp(),
+			finished: false,
+			timedOut: false
+		};
+
+		function readFrom(stream:haxe.io.Input, to:{value:String}, echoChunk:Null<(chunk:String) -> Void>) {
+			final buf = haxe.io.Bytes.alloc(256);
+			final acc = new StringBuf();
+			try {
+				while (true) {
+					final len = stream.readBytes(buf, 0, buf.length);
+					if (len <= 0)
+						break;
+					state.lastActivity = haxe.Timer.stamp();
+					final chunk = buf.getString(0, len);
+					acc.add(chunk);
+					if (echoChunk != null)
+						echoChunk(chunk);
+				}
+			} catch (_:haxe.io.Eof) {}
+			to.value = acc.toString();
+			streamsLock.release();
+		}
+
+		final out = {value: ""};
+		final err = {value: ""};
+		// git and hg write progress to stderr, so only stderr is echoed live
+		Thread.create(readFrom.bind(p.stdout, out, null));
+		Thread.create(readFrom.bind(p.stderr, err, echo));
+
+		if (stallTimeout > 0) {
+			Thread.create(function() {
+				while (!state.finished) {
+					Sys.sleep(1);
+					if (state.finished)
+						break;
+					if (haxe.Timer.stamp() - state.lastActivity > stallTimeout) {
+						state.timedOut = true;
+						killProcessTree(p);
+						break;
+					}
+				}
+			});
+		}
+
+		final code = p.exitCode();
+		state.finished = true;
+		for (_ in 0...2) {
+			// wait until we finish reading from both streams
+			streamsLock.wait();
+		}
+
+		final ret = {
+			code: code,
+			out: out.value,
+			err: err.value,
+			timedOut: state.timedOut
+		};
+		p.close();
+		return ret;
+	}
 }
 
 /** Class wrapping `git` operations. **/
@@ -258,6 +409,16 @@ class Git extends Vcs {
 		run(["reset", "--hard", "@{u}"], true);
 	}
 
+	/**
+		Forces git to emit its progress meter even though stderr is a pipe,
+		so that it can be streamed to the user via `progressOutput`.
+	**/
+	inline function withProgressFlag(args:Array<String>):Array<String> {
+		if (progressOutput != null)
+			args.push("--progress");
+		return args;
+	}
+
 	public function clone(libPath:String, data:VcsData, flat = false):Void {
 		final vcsArgs = ["clone", data.url, libPath];
 
@@ -278,14 +439,15 @@ class Git extends Vcs {
 			vcsArgs.push('--depth=1');
 		}
 
-		if (run(vcsArgs).code != 0)
-			throw VcsError.CantCloneRepo(this, data.url/*, ret.out*/);
+		final ret = runStreamed(withProgressFlag(vcsArgs));
+		if (ret.code != 0)
+			throw VcsError.CantCloneRepo(this, data.url, ret.err);
 
 		if (data.branch != null && data.commit != null) {
 			optionalLog('Checking out branch ${data.branch} at commit ${data.commit} of ${libPath}');
 			FsUtils.runInDirectory(libPath, () -> {
 				if (cloneDepth1) {
-					runCheckoutRelatedCommand(data.commit, ["fetch", "--depth=1", "origin", data.commit]);
+					runCheckoutRelatedCommand(data.commit, withProgressFlag(["fetch", "--depth=1", "origin", data.commit]));
 				}
 				run(["reset", "--hard", data.commit], true);
 			});
@@ -296,7 +458,7 @@ class Git extends Vcs {
 			optionalLog('Checking out tag/version ${data.tag} of ${VcsID.Git.getName()}');
 			FsUtils.runInDirectory(libPath, () -> {
 				final tagRef = 'tags/${data.tag}';
-				runCheckoutRelatedCommand(tagRef, ["fetch", "--depth=1", "origin", '$tagRef:$tagRef']);
+				runCheckoutRelatedCommand(tagRef, withProgressFlag(["fetch", "--depth=1", "origin", '$tagRef:$tagRef']));
 				checkout('tags/${data.tag}', false);
 			});
 		}
@@ -307,25 +469,25 @@ class Git extends Vcs {
 				run(["submodule", "sync", "--recursive"]);
 
 				optionalLog('Downloading/updating submodules for ${VcsID.Git.getName()}');
-				final ret = run(["submodule", "update", "--init", "--recursive", "--depth=1", "--single-branch"]);
+				final ret = runStreamed(withProgressFlag(["submodule", "update", "--init", "--recursive", "--depth=1", "--single-branch"]));
 				if (ret.code != 0)
 				{
-					throw VcsError.SubmoduleError(this, data.url, ret.out);
+					throw VcsError.SubmoduleError(this, data.url, ret.err);
 				}
 			});
 		}
 	}
 
 	inline function runCheckoutRelatedCommand(ref, args:Array<String>) {
-		final ret = run(args);
+		final ret = runStreamed(args);
 		if (ret.code != 0) {
-			throw VcsError.CantCheckout(this, ref, ret.out);
+			throw VcsError.CantCheckout(this, ref, ret.err);
 		}
 	}
 
 	function checkout(ref:String, fetch:Bool) {
 		if (fetch) {
-			runCheckoutRelatedCommand(ref, ["fetch", "--depth=1", "origin", ref]);
+			runCheckoutRelatedCommand(ref, withProgressFlag(["fetch", "--depth=1", "origin", ref]));
 		}
 
 		runCheckoutRelatedCommand(ref, ["checkout", ref]);

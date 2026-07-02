@@ -841,6 +841,18 @@ class Installer {
 		final vcs = Vcs.create(id, userInterface.log.bind(_, Debug), userInterface.log.bind(_, Optional));
 		if (vcs == null || !vcs.available)
 			throw 'Could not use $id, please make sure it is installed and available in your PATH.';
+		// stream the vcs' own progress output live, unless in quiet mode
+		// (the same condition under which download progress logging is disabled)
+		if (userInterface.getDownloadProgressFunction() != null) {
+			final stderr = Sys.stderr();
+			vcs.progressOutput = function(chunk:String) {
+				stderr.writeString(chunk);
+				stderr.flush();
+			};
+		}
+		// respect --no-timeout
+		if (!Connection.hasTimeout)
+			vcs.stallTimeout = 0;
 		return vcs;
 	}
 
@@ -855,22 +867,35 @@ class Installer {
 				+ (vcsData.tag != null ? " tag: " + vcsData.tag : "")
 				+ (vcsData.commit != null ? " commit: " + vcsData.commit : "")
 			);
-			try {
-				vcs.clone(libPath, vcsData, noVcsSubmodules);
-			} catch (error:VcsError) {
-				FsUtils.deleteRec(libPath);
-				switch (error) {
-					case VcsUnavailable(vcs):
-						throw 'Could not use ${vcs.executable}, please make sure it is installed and available in your PATH.';
-					case CantCloneRepo(_, _, stderr):
-						throw 'Could not clone ${id.getName()} repository' + (stderr != null ? ":\n" + stderr : ".");
-					case CantCheckout(_, ref, stderr):
-						throw 'Could not checkout commit or tag "$ref": ' + stderr;
-					case SubmoduleError(_, repo, stderr):
-						throw 'Could not clone submodule(s) from $repo: ' + stderr;
-					case CommandFailed(_, code, stdout, stderr):
-						throw new VcsCommandFailed(id, code, stdout, stderr);
-				};
+			final maxAttempts = 3;
+			var attempt = 0;
+			while (true) {
+				attempt++;
+				try {
+					vcs.clone(libPath, vcsData, noVcsSubmodules);
+					return;
+				} catch (error:VcsError) {
+					FsUtils.deleteRec(libPath);
+					switch (error) {
+						case VcsUnavailable(vcs):
+							throw 'Could not use ${vcs.executable}, please make sure it is installed and available in your PATH.';
+						case CantCloneRepo(_, _, stderr):
+							throw 'Could not clone ${id.getName()} repository' + (stderr != null ? ":\n" + stderr : ".");
+						case CantCheckout(_, ref, stderr):
+							throw 'Could not checkout commit or tag "$ref": ' + stderr;
+						case SubmoduleError(_, repo, stderr):
+							throw 'Could not clone submodule(s) from $repo: ' + stderr;
+						case CommandFailed(_, code, stdout, stderr):
+							throw new VcsCommandFailed(id, code, stdout, stderr);
+						case CommandTimedOut(_, seconds) if (attempt < maxAttempts):
+							userInterface.log('\nNo data received from ${id.getName()} for ${seconds}s, aborted. Retrying... ($attempt/${maxAttempts - 1})');
+							FsUtils.safeDir(libPath);
+						case CommandTimedOut(_, seconds):
+							throw 'Could not clone ${id.getName()} repository: '
+								+ 'no data received for ${seconds}s (gave up after $maxAttempts attempts).\n'
+								+ 'Check your network connection, or use --no-timeout to wait indefinitely.';
+					};
+				}
 			}
 		}
 
@@ -890,9 +915,11 @@ class Installer {
 			// only re-clone when the requested branch/tag actually differs from what is
 			// installed; reinstalling the same ref should not prompt to overwrite
 			if (vcsData.branch != null && currentData.branch != vcsData.branch) {
-				final currentBranchStr = currentData.branch != null ? currentData.branch : "<unspecified>";
-				if (!userInterface.confirm('Overwrite "$currentBranchStr" with "${vcsData.branch}"')) {
-					userInterface.log('Library $library $id repository remains at "$currentBranchStr"');
+				// if no branch is recorded there is nothing to protect (local changes
+				// are already guarded by the commit check above), so don't prompt
+				if (currentData.branch != null
+					&& !userInterface.confirm('Overwrite "${currentData.branch}" with "${vcsData.branch}"')) {
+					userInterface.log('Library $library $id repository remains at "${currentData.branch}"');
 					return;
 				}
 				FsUtils.deleteRec(libPath);
