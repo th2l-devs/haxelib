@@ -91,6 +91,12 @@ abstract class Vcs implements IVcs {
 	public var progressOutput:Null<(chunk:String) -> Void> = null;
 
 	/**
+		If set, called once each streamed command finishes, so a consumer of
+		`progressOutput` can finalize whatever it was drawing (e.g. end the line).
+	**/
+	public var progressDone:Null<() -> Void> = null;
+
+	/**
 		Number of seconds a streamed command may stay completely silent before
 		it is considered stalled and gets killed. `0` disables the watchdog.
 	**/
@@ -238,6 +244,10 @@ abstract class Vcs implements IVcs {
 		print("# Running command: " + executable + " " + args.toString() + "\n");
 
 		final proc = commandStreamed(executable, args, progressOutput, stallTimeout);
+
+		// let the progress consumer finalize its output (e.g. end the bar line)
+		if (progressDone != null)
+			progressDone();
 
 		if (proc.timedOut)
 			throw VcsError.CommandTimedOut(this, stallTimeout);

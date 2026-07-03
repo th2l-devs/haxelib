@@ -97,21 +97,16 @@ class Cli {
 	// ── Progress rendering (pip / rich style) ────────────────────────────────
 	//
 	// A solid `━` line that fills the terminal width, with the completed part
-	// drawn in colour. Colours can be turned off by setting the `NO_COLOR`
-	// environment variable; the box-drawing glyph falls back to ASCII when
-	// `HAXELIB_NO_UNICODE` is set (for consoles that are not UTF-8).
+	// drawn in colour. Colours are disabled by the `NO_COLOR` convention; the
+	// box-drawing glyph is used only when the console is UTF-8 (auto-detected),
+	// otherwise it falls back to ASCII so non-UTF-8 consoles don't get mojibake.
+	// `HAXELIB_NO_UNICODE` / `HAXELIB_UNICODE` force the glyph off / on.
 	//
 
 	static final ESC = "\x1b";
 
 	/** Whether ANSI colours are emitted. Honours the `NO_COLOR` convention. **/
 	static final useColor:Bool = Sys.getEnv("NO_COLOR") == null;
-
-	/** Whether the fancy box-drawing bar glyph is used (vs. an ASCII fallback). **/
-	static final useUnicode:Bool = Sys.getEnv("HAXELIB_NO_UNICODE") == null;
-
-	static final BAR_FILL = useUnicode ? "━" : "=";
-	static final BAR_TRACK = useUnicode ? "━" : "-";
 
 	/** Frame counter used to animate the pulse shown when the total is unknown. **/
 	static var pulseFrame = 0;
@@ -120,6 +115,19 @@ class Cli {
 	static var lastVisibleLen = 0;
 
 	static var cachedWidth = 0;
+	static var cachedUnicode:Null<Bool> = null;
+
+	/** Whether the box-drawing bar glyph is safe to use on this console. **/
+	static function unicodeEnabled():Bool {
+		detectConsole();
+		return cachedUnicode;
+	}
+
+	static inline function barFill():String
+		return unicodeEnabled() ? "━" : "=";
+
+	static inline function barTrack():String
+		return unicodeEnabled() ? "━" : "-";
 
 	/** Formats a byte count as a human readable string, e.g. `2.1 MB`. **/
 	static function formatBytes(bytes:Int):String {
@@ -156,59 +164,79 @@ class Cli {
 		return buf.toString();
 	}
 
-	/**
-		Best-effort detection of the terminal width, cached for the session.
-
-		Falls back to 80 columns if the width cannot be determined.
-	**/
 	static function terminalWidth():Int {
-		if (cachedWidth != 0)
-			return cachedWidth;
+		detectConsole();
+		return cachedWidth;
+	}
+
+	/**
+		Best-effort, one-time detection of the console width and whether it can
+		render UTF-8 box-drawing characters. Falls back to 80 columns / ASCII.
+	**/
+	static function detectConsole():Void {
+		if (cachedUnicode != null)
+			return;
+		final isWindows = Sys.systemName() == "Windows";
 		cachedWidth = 80;
-		inline function accept(n:Null<Int>):Bool {
+		// unix terminals are UTF-8; on Windows default to ASCII unless proven otherwise
+		cachedUnicode = !isWindows;
+		if (Sys.getEnv("HAXELIB_NO_UNICODE") != null)
+			cachedUnicode = false;
+		final forceUnicode = Sys.getEnv("HAXELIB_UNICODE") != null;
+		if (forceUnicode)
+			cachedUnicode = true;
+
+		inline function acceptWidth(n:Null<Int>):Bool {
 			if (n != null && n >= 20) {
 				cachedWidth = n > 200 ? 200 : n;
 				return true;
 			}
 			return false;
 		}
-		if (accept(Std.parseInt(Sys.getEnv("COLUMNS") ?? "")))
-			return cachedWidth;
+
+		var haveWidth = acceptWidth(Std.parseInt(Sys.getEnv("COLUMNS") ?? ""));
 		try {
-			if (Sys.systemName() == "Windows") {
-				final p = new sys.io.Process("powershell", ["-NoProfile", "-Command", "[Console]::WindowWidth"]);
-				final out = p.stdout.readAll().toString();
+			if (isWindows) {
+				// one call gives us both the width and the active output code page
+				final p = new sys.io.Process("powershell",
+					["-NoProfile", "-NonInteractive", "-Command", "[Console]::WindowWidth; [Console]::OutputEncoding.CodePage"]);
+				final out = StringTools.replace(p.stdout.readAll().toString(), "\r", "");
 				p.close();
-				accept(Std.parseInt(StringTools.trim(out)));
-			} else {
+				final lines = out.split("\n").filter(l -> StringTools.trim(l) != "");
+				if (!haveWidth && lines.length >= 1)
+					acceptWidth(Std.parseInt(StringTools.trim(lines[0])));
+				// code page 65001 == UTF-8; only then are box-drawing glyphs safe
+				if (!forceUnicode && Sys.getEnv("HAXELIB_NO_UNICODE") == null && lines.length >= 2)
+					cachedUnicode = Std.parseInt(StringTools.trim(lines[1])) == 65001;
+			} else if (!haveWidth) {
 				final p = new sys.io.Process("stty", ["size"]);
 				final out = p.stdout.readAll().toString();
 				p.close();
 				final parts = StringTools.trim(out).split(" ");
 				if (parts.length == 2)
-					accept(Std.parseInt(parts[1]));
+					acceptWidth(Std.parseInt(parts[1]));
 			}
 		} catch (_:Dynamic) {}
-		return cachedWidth;
 	}
 
-	/** Renders a solid `━` bar of `width` columns filled to `fraction` (0-1). **/
+	/** Renders a solid bar of `width` columns filled to `fraction` (0-1). **/
 	static function solidBar(fraction:Float, width:Int):String {
 		if (fraction < 0) fraction = 0;
 		if (fraction > 1) fraction = 1;
 		final filled = Math.round(fraction * width);
 		// filled part in pink, remaining track in dim grey, matching pip
-		return paint("249;38;114", repeatStr(BAR_FILL, filled))
-			+ paint("88;91;112", repeatStr(BAR_TRACK, width - filled));
+		return paint("249;38;114", repeatStr(barFill(), filled))
+			+ paint("88;91;112", repeatStr(barTrack(), width - filled));
 	}
 
 	/** Renders an indeterminate "pulse" bar with a block sweeping across it. **/
 	static function pulseBar(width:Int):String {
 		final seg = Std.int(width / 4);
 		final pos = pulseFrame++ % (width + seg) - seg;
+		final glyph = barFill();
 		final buf = new StringBuf();
 		for (i in 0...width)
-			buf.add(paint(i >= pos && i < pos + seg ? "249;38;114" : "88;91;112", BAR_FILL));
+			buf.add(paint(i >= pos && i < pos + seg ? "249;38;114" : "88;91;112", glyph));
 		return buf.toString();
 	}
 
@@ -284,6 +312,68 @@ class Cli {
 			final stats = '${formatBytesPair(cur, max)} $speedStr eta $etaStr';
 			final width = barWidthFor(reserve);
 			drawBar(solidBar(fraction, width), width, StringTools.rpad(stats, " ", reserve), reserve, false);
+		}
+	}
+
+	//
+	// ── Git progress ─────────────────────────────────────────────────────────
+	//
+	// git writes a `\r`-updated progress meter to stderr; we buffer those chunks,
+	// pull the phase + percentage out of them and render our own bar instead of
+	// git's raw "Receiving objects: 42% (…)" lines. Non-progress lines (info and
+	// errors) are dropped here - on failure the full stderr is surfaced anyway.
+	//
+
+	static var gitBuf = "";
+	static final gitPhaseEReg = ~/(Receiving objects|Resolving deltas|Compressing objects|Counting objects):\s+(\d+)% \((\d+)\/(\d+)\)/;
+
+	public static function printVcsProgress(chunk:String) {
+		gitBuf += chunk;
+		// git separates progress updates with \r and finished lines with \n
+		while (true) {
+			final rIdx = gitBuf.indexOf("\r");
+			final nIdx = gitBuf.indexOf("\n");
+			final idx = if (rIdx == -1) nIdx else if (nIdx == -1) rIdx else (rIdx < nIdx ? rIdx : nIdx);
+			if (idx == -1)
+				break;
+			handleGitSegment(gitBuf.substring(0, idx));
+			gitBuf = gitBuf.substring(idx + 1);
+		}
+	}
+
+	static function handleGitSegment(seg:String) {
+		if (!gitPhaseEReg.match(seg))
+			return; // swallow info/error lines - errors resurface if the command fails
+		final pct = Std.parseInt(gitPhaseEReg.matched(2));
+		if (pct == null)
+			return;
+		final phase = gitPhaseEReg.matched(1);
+		final label = switch phase {
+			case "Receiving objects": "Receiving";
+			case "Resolving deltas": "Resolving";
+			case "Compressing objects": "Compressing";
+			default: "Counting";
+		}
+		// for the download phase, show git's own "size | speed" detail
+		var detail = '(${gitPhaseEReg.matched(3)}/${gitPhaseEReg.matched(4)})';
+		if (phase == "Receiving objects") {
+			final ci = seg.indexOf("), ");
+			if (ci != -1)
+				detail = StringTools.replace(seg.substring(ci + 3), ", done.", "");
+		}
+		final reserve = 44;
+		var stats = '$label $pct%  $detail';
+		if (stats.length > reserve)
+			stats = stats.substr(0, reserve);
+		final width = barWidthFor(reserve);
+		drawBar(solidBar(pct / 100, width), width, StringTools.rpad(stats, " ", reserve), reserve, false);
+	}
+
+	public static function finishVcsProgress() {
+		gitBuf = "";
+		if (lastVisibleLen > 0) {
+			Sys.print("\n");
+			lastVisibleLen = 0;
 		}
 	}
 

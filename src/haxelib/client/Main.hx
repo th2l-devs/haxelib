@@ -430,7 +430,9 @@ class Main {
 			},
 			confirm: Cli.ask,
 			logInstallationProgress: (Cli.mode == Debug) ? Cli.printInstallStatus: null,
-			logDownloadProgress: (Cli.mode != Quiet) ? Cli.printDownloadStatus : null
+			logDownloadProgress: (Cli.mode != Quiet) ? Cli.printDownloadStatus : null,
+			logVcsProgress: (Cli.mode != Quiet) ? Cli.printVcsProgress : null,
+			logVcsProgressDone: (Cli.mode != Quiet) ? Cli.finishVcsProgress : null
 		}
 		final installer = new Installer(scope, userInterface);
 		installer.skipDependencies = flags.contains(SkipDependencies);

@@ -61,6 +61,8 @@ class UserInterface {
 	final _confirm:(msg:String)->Bool;
 	final _logDownloadProgress:Null<(filename:String, finished:Bool, cur:Int, max:Null<Int>, downloaded:Int, time:Float) -> Void>;
 	final _logInstallationProgress:Null<(msg:String, current:Int, total:Int) -> Void>;
+	final _logVcsProgress:Null<(chunk:String) -> Void>;
+	final _logVcsProgressDone:Null<() -> Void>;
 
 	/**
 		`log` function used for logging information.
@@ -77,12 +79,16 @@ class UserInterface {
 		?log:Null<(msg:String, priority:LogPriority)-> Void>,
 		?confirm:Null<(msg:String)->Bool>,
 		?logDownloadProgress:Null<(filename:String, finished:Bool, cur:Int, max:Null<Int>, downloaded:Int, time:Float) -> Void>,
-		?logInstallationProgress:Null<(msg:String, current:Int, total:Int) -> Void>
+		?logInstallationProgress:Null<(msg:String, current:Int, total:Int) -> Void>,
+		?logVcsProgress:Null<(chunk:String) -> Void>,
+		?logVcsProgressDone:Null<() -> Void>
 	) {
 		_log = log;
 		_confirm = confirm != null ? confirm : (_)-> {true;};
 		_logDownloadProgress = logDownloadProgress;
 		_logInstallationProgress = logInstallationProgress;
+		_logVcsProgress = logVcsProgress;
+		_logVcsProgressDone = logVcsProgressDone;
 	}
 
 	public inline function log(msg:String, priority:LogPriority = Default):Void {
@@ -106,6 +112,16 @@ class UserInterface {
 
 	public inline function getDownloadProgressFunction():Null<(filename:String, finished:Bool, cur:Int, max:Null<Int>, downloaded:Int, time:Float) -> Void> {
 		return _logDownloadProgress;
+	}
+
+	/** Sink for raw live output (e.g. git's progress meter) of a vcs command. **/
+	public inline function getVcsProgressFunction():Null<(chunk:String) -> Void> {
+		return _logVcsProgress;
+	}
+
+	/** Called after each streamed vcs command so the progress display can finalize. **/
+	public inline function getVcsProgressDoneFunction():Null<() -> Void> {
+		return _logVcsProgressDone;
 	}
 }
 
@@ -841,14 +857,12 @@ class Installer {
 		final vcs = Vcs.create(id, userInterface.log.bind(_, Debug), userInterface.log.bind(_, Optional));
 		if (vcs == null || !vcs.available)
 			throw 'Could not use $id, please make sure it is installed and available in your PATH.';
-		// stream the vcs' own progress output live, unless in quiet mode
-		// (the same condition under which download progress logging is disabled)
-		if (userInterface.getDownloadProgressFunction() != null) {
-			final stderr = Sys.stderr();
-			vcs.progressOutput = function(chunk:String) {
-				stderr.writeString(chunk);
-				stderr.flush();
-			};
+		// render the vcs' own progress (git's meter) live as our progress bar,
+		// unless in quiet mode (same gate as download progress logging)
+		final vcsProgress = userInterface.getVcsProgressFunction();
+		if (vcsProgress != null) {
+			vcs.progressOutput = vcsProgress;
+			vcs.progressDone = userInterface.getVcsProgressDoneFunction();
 		}
 		// respect --no-timeout
 		if (!Connection.hasTimeout)
@@ -899,17 +913,33 @@ class Installer {
 			}
 		}
 
+		// wipe any existing install and clone it again from scratch
+		function reinstall() {
+			FsUtils.deleteRec(libPath);
+			FsUtils.safeDir(libPath);
+			doVcsClone();
+		}
+
 		if (repository.isVersionInstalled(library, id)) {
 			userInterface.log('You already have $library version $id installed.');
 
 			final wasUpdated = vcsDataByName.exists(library);
 
-			final currentData = vcsDataByName[library] ?? repository.getVcsData(library, id);
-			FsUtils.runInDirectory(libPath, function() {
-				if (vcs.getRef() != currentData.commit) {
+			// read the current state of the install; if the repository is missing
+			// or corrupt (e.g. a previous clone was interrupted), reading it throws
+			// a VcsError - in that case just reinstall it rather than crashing
+			final currentData = try {
+				final data = vcsDataByName[library] ?? repository.getVcsData(library, id);
+				if (FsUtils.runInDirectory(libPath, vcs.getRef) != data.commit) {
 					throw 'Cannot overwrite currently installed $id version of $library. There are local changes.';
 				}
-			});
+				data;
+			} catch (e:VcsError) {
+				userInterface.log('The installed $library $id repository is not usable, reinstalling it...');
+				reinstall();
+				vcsData.commit = FsUtils.runInDirectory(libPath, vcs.getRef);
+				return;
+			}
 
 			// TODO check different urls as well
 			// only re-clone when the requested branch/tag actually differs from what is
