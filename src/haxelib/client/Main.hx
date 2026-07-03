@@ -134,7 +134,9 @@ class Main {
 	}
 
 	function version() {
-		Cli.print(VERSION_LONG);
+		// keep the version number itself raw so scripts can still parse it
+		Cli.printRaw(VERSION_LONG);
+		Cli.printDim("ui by mr_chaoss");
 	}
 
 	static function combineAliases(name:String, aliases:Array<String>):String {
@@ -271,11 +273,11 @@ class Main {
 		} catch (e:RepoManager.InvalidConfiguration) {
 			switch e.type {
 				case NoneSet:
-					Cli.printError('Error: This is the first time you are running haxelib. Please run `haxelib setup` first.');
+					Cli.printError('This is the first time you are running haxelib. Please run `haxelib setup` first.');
 				case NotFound(_):
-					Cli.printError('Error: ${e.message}. Please run `haxelib setup` again.');
+					Cli.printError('${e.message}. Please run `haxelib setup` again.');
 				case IsFile(_):
-					Cli.printError('Error: ${e.message}. Please remove it and run `haxelib setup` again.');
+					Cli.printError('${e.message}. Please remove it and run `haxelib setup` again.');
 			}
 			Sys.exit(1);
 		} catch (e:Installer.VcsCommandFailed) {
@@ -548,7 +550,8 @@ class Main {
 	}
 
 	function config() {
-		Cli.print(getRepositoryPath());
+		// often parsed by scripts - keep it raw
+		Cli.printRaw(getRepositoryPath());
 	}
 
 	function list() {
@@ -694,7 +697,8 @@ class Main {
 		if (libraries.length == 0)
 			return;
 
-		Cli.print(scope.getArgsAsHxmlForLibraries(libraries));
+		// consumed by the Haxe compiler - must stay untagged
+		Cli.printRaw(scope.getArgsAsHxmlForLibraries(libraries));
 	}
 
 	function libpath() {
@@ -703,7 +707,7 @@ class Main {
 		final libraries = extractLibArgs();
 
 		for (library in libraries)
-			Cli.print(scope.getPath(library.library, library.version));
+			Cli.printRaw(scope.getPath(library.library, library.version));
 	}
 
 	function dev() {
@@ -924,7 +928,7 @@ class Main {
 				final scope = Scope.getScopeForRepository(repository);
 				if (priorityFlags.contains(Debug)) {
 					final path = scope.getPath(HAXELIB_LIBNAME);
-					Cli.printError('[debug] Using $HAXELIB_LIBNAME from "$path"');
+					Sys.stderr().writeString('[debug] Using $HAXELIB_LIBNAME from "$path"\n');
 				}
 				scope.runScript(HAXELIB_LIBNAME, {
 					args: args,
@@ -960,7 +964,7 @@ class Main {
 		} catch (e:haxe.Exception) {
 			if (priorityFlags.contains(Debug))
 				rethrow(e);
-			Cli.printError('Error: ${e.message}');
+			Cli.printError('${e.message}');
 			Sys.exit(1);
 			return;
 		};

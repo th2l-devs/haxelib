@@ -197,9 +197,12 @@ class Cli {
 		var haveWidth = acceptWidth(Std.parseInt(Sys.getEnv("COLUMNS") ?? ""));
 		try {
 			if (isWindows) {
-				// one call gives us both the width and the active output code page
+				// one call gives us both the width and the active output code page.
+				// use the smaller of window/buffer width - if the buffer is wider than
+				// the visible window, rendering to the buffer width would wrap.
 				final p = new sys.io.Process("powershell",
-					["-NoProfile", "-NonInteractive", "-Command", "[Console]::WindowWidth; [Console]::OutputEncoding.CodePage"]);
+					["-NoProfile", "-NonInteractive", "-Command",
+						"[Math]::Min([Console]::WindowWidth, [Console]::BufferWidth); [Console]::OutputEncoding.CodePage"]);
 				final out = StringTools.replace(p.stdout.readAll().toString(), "\r", "");
 				p.close();
 				final lines = out.split("\n").filter(l -> StringTools.trim(l) != "");
@@ -260,8 +263,15 @@ class Cli {
 		}
 	}
 
+	/** Preferred (compact) width of the bar itself, in columns. **/
+	static inline final BAR_WIDTH = 28;
+
 	static inline function barWidthFor(reserve:Int):Int {
-		final w = terminalWidth() - 4 - reserve;
+		// keep the bar short and fixed; only shrink further if the terminal is too
+		// narrow to fit bar + stats without reaching the last column (a full-width
+		// line would auto-wrap and the \r redraw would then pile frames up).
+		final maxForTerminal = terminalWidth() - 6 - reserve;
+		final w = BAR_WIDTH < maxForTerminal ? BAR_WIDTH : maxForTerminal;
 		return w < 10 ? 10 : w;
 	}
 
@@ -382,37 +392,72 @@ class Cli {
 		return Sys.stdin().readLine();
 	}
 
+	//
+	// ── Tagged output ────────────────────────────────────────────────────────
+	//
+	// Every human facing line is prefixed with a coloured level tag ([INFO],
+	// [WARN], [ERROR], [DEBUG]). Machine readable command output (path, libpath,
+	// config) must stay clean - use `printRaw` for those, never `print`.
+	//
+
+	/** Builds a padded, coloured `[LABEL]` tag followed by `msg`. **/
+	static function tagged(label:String, rgb:String, msg:String):String {
+		final tag = paint(rgb, StringTools.rpad('[$label]', " ", 7));
+		return '$tag $msg';
+	}
+
+	static inline function infoTag(msg:String):String
+		return tagged("INFO", "120;120;135", msg); // dark grey
+
+	static inline function warnTag(msg:String):String
+		return tagged("WARN", "220;180;70", msg); // amber
+
+	static inline function errorTag(msg:String):String
+		return tagged("ERROR", "225;80;80", msg); // red
+
+	static inline function debugTag(msg:String):String
+		return tagged("DEBUG", "95;95;110", msg); // dim grey
+
+	/** Human facing info line, tagged `[INFO]`. **/
 	public static inline function print(str:String)
+		Sys.println(infoTag(str));
+
+	/** Raw, untagged line - for machine readable output the toolchain parses. **/
+	public static inline function printRaw(str:String)
 		Sys.println(str);
+
+	/** Dimmed line with no tag (credits, subtle notes). **/
+	public static inline function printDim(str:String)
+		Sys.println(paint("110;110;120", str));
 
 	public static inline function printString(str:String)
 		Sys.print(str);
 
 	public static inline function printWarning(message:String)
 		if (mode != Quiet)
-			Sys.stderr().writeString('Warning: $message\n');
+			Sys.stderr().writeString(warnTag(message) + "\n");
 
 	public static inline function printError(message:String)
-		Sys.stderr().writeString('${message}\n');
+		Sys.stderr().writeString(errorTag(message) + "\n");
 
 	/** Prints `message` to stdout only if in Debug mode **/
 	public static function printDebug(message:String)
 		if (mode == Debug)
-			Sys.println(message);
+			Sys.println(debugTag(message));
 
 	/** Prints `message` to stderr only if in Debug mode **/
 	public static function printDebugError(message:String)
 		if (mode == Debug)
-			Sys.stderr().writeString('${message}\n');
+			Sys.stderr().writeString(debugTag(message) + "\n");
 
 	/** Prints `message` to stdout, unless in Quiet mode **/
 	public static function printOptional(message:String)
 		if (mode != Quiet)
-			Sys.println(message);
+			Sys.println(infoTag(message));
 
 	/** Prints `message` to stderr, unless in Quiet mode **/
 	public static function printOptionalError(message:String)
 		if (mode != Quiet)
-			Sys.stderr().writeString('${message}\n');
+			Sys.stderr().writeString(infoTag(message) + "\n");
 
 }
