@@ -105,8 +105,36 @@ class Cli {
 
 	static final ESC = "\x1b";
 
-	/** Whether ANSI colours are emitted. Honours the `NO_COLOR` convention. **/
-	static final useColor:Bool = Sys.getEnv("NO_COLOR") == null;
+	/**
+		Whether ANSI colours are emitted.
+
+		Classic Windows console (conhost) does not process ANSI escape codes
+		unless virtual-terminal mode is enabled, so emitting them there would
+		print raw garbage like `←[38;2;…m`. We therefore only enable colour on
+		terminals known to support it (Windows Terminal, ConEmu, ansicon, or any
+		unix-style terminal), and default to off on bare Windows consoles.
+
+		Honours `NO_COLOR` (force off) and `HAXELIB_COLOR`/`FORCE_COLOR` (force on).
+	**/
+	static final useColor:Bool = computeUseColor();
+
+	static function computeUseColor():Bool {
+		if (Sys.getEnv("NO_COLOR") != null)
+			return false;
+		if (Sys.getEnv("HAXELIB_COLOR") != null || Sys.getEnv("FORCE_COLOR") != null)
+			return true;
+		if (Sys.systemName() != "Windows")
+			return true; // unix terminals handle ANSI
+		// Windows: only terminals that advertise ANSI support
+		if (Sys.getEnv("WT_SESSION") != null) // Windows Terminal
+			return true;
+		if (Sys.getEnv("ConEmuANSI") == "ON") // ConEmu / Cmder
+			return true;
+		if (Sys.getEnv("ANSICON") != null) // ansicon
+			return true;
+		final term = Sys.getEnv("TERM"); // mintty / git-bash / cygwin
+		return term != null && term != "" && term != "dumb";
+	}
 
 	/** Frame counter used to animate the pulse shown when the total is unknown. **/
 	static var pulseFrame = 0;
