@@ -93,13 +93,33 @@ class Cli {
 		return s.toString();
 	}
 
-	/** Width (in characters) of the drawn progress bars. **/
-	static inline final BAR_WIDTH = 30;
+	//
+	// ── Progress rendering (pip / rich style) ────────────────────────────────
+	//
+	// A solid `━` line that fills the terminal width, with the completed part
+	// drawn in colour. Colours can be turned off by setting the `NO_COLOR`
+	// environment variable; the box-drawing glyph falls back to ASCII when
+	// `HAXELIB_NO_UNICODE` is set (for consoles that are not UTF-8).
+	//
 
-	/** Frame counter used to animate the spinner shown for unknown totals. **/
-	static var spinnerFrame = 0;
+	static final ESC = "\x1b";
 
-	static final SPINNER_CHARS = ["|", "/", "-", "\\"];
+	/** Whether ANSI colours are emitted. Honours the `NO_COLOR` convention. **/
+	static final useColor:Bool = Sys.getEnv("NO_COLOR") == null;
+
+	/** Whether the fancy box-drawing bar glyph is used (vs. an ASCII fallback). **/
+	static final useUnicode:Bool = Sys.getEnv("HAXELIB_NO_UNICODE") == null;
+
+	static final BAR_FILL = useUnicode ? "━" : "=";
+	static final BAR_TRACK = useUnicode ? "━" : "-";
+
+	/** Frame counter used to animate the pulse shown when the total is unknown. **/
+	static var pulseFrame = 0;
+
+	/** Length (in visible columns) of the last status line, to blank leftovers. **/
+	static var lastVisibleLen = 0;
+
+	static var cachedWidth = 0;
 
 	/** Formats a byte count as a human readable string, e.g. `2.1 MB`. **/
 	static function formatBytes(bytes:Int):String {
@@ -113,85 +133,157 @@ class Cli {
 		return '${Unit.convertFromBytes(cur, unit)}/${Unit.convertFromBytes(max, unit)} $unit';
 	}
 
-	/** Formats a duration in seconds as `m:ss`, e.g. `0:07` or `2:41`. **/
-	static function formatTime(seconds:Float):String {
+	/** Formats a duration in seconds as `h:mm:ss`, e.g. `0:00:07` (pip style). **/
+	static function formatClock(seconds:Float):String {
 		var total = Std.int(seconds);
 		if (total < 0)
 			total = 0;
-		final mins = Std.int(total / 60);
-		final secs = total % 60;
-		return '$mins:' + (secs < 10 ? '0$secs' : '$secs');
+		final h = Std.int(total / 3600);
+		final m = Std.int((total % 3600) / 60);
+		final s = total % 60;
+		inline function pad(n:Int) return n < 10 ? '0$n' : '$n';
+		return '$h:${pad(m)}:${pad(s)}';
 	}
 
-	/** Renders a `[#########---------]` style bar filled to `fraction` (0-1). **/
-	static function progressBar(fraction:Float):String {
-		if (fraction < 0) fraction = 0;
-		if (fraction > 1) fraction = 1;
-		final filled = Math.round(fraction * BAR_WIDTH);
+	static inline function paint(rgb:String, s:String):String
+		return useColor ? '$ESC[38;2;${rgb}m$s$ESC[0m' : s;
+
+	/** Repeats `s` `n` times (safe for multi-byte glyphs). **/
+	static function repeatStr(s:String, n:Int):String {
 		final buf = new StringBuf();
-		buf.addChar("[".code);
-		for (i in 0...BAR_WIDTH)
-			buf.addChar(if (i < filled) "#".code else "-".code);
-		buf.addChar("]".code);
+		for (_ in 0...n)
+			buf.add(s);
 		return buf.toString();
 	}
 
-	/** Returns the next frame of the spinner used when the total is unknown. **/
-	static function spinner():String {
-		return SPINNER_CHARS[spinnerFrame++ % SPINNER_CHARS.length];
+	/**
+		Best-effort detection of the terminal width, cached for the session.
+
+		Falls back to 80 columns if the width cannot be determined.
+	**/
+	static function terminalWidth():Int {
+		if (cachedWidth != 0)
+			return cachedWidth;
+		cachedWidth = 80;
+		inline function accept(n:Null<Int>):Bool {
+			if (n != null && n >= 20) {
+				cachedWidth = n > 200 ? 200 : n;
+				return true;
+			}
+			return false;
+		}
+		if (accept(Std.parseInt(Sys.getEnv("COLUMNS") ?? "")))
+			return cachedWidth;
+		try {
+			if (Sys.systemName() == "Windows") {
+				final p = new sys.io.Process("powershell", ["-NoProfile", "-Command", "[Console]::WindowWidth"]);
+				final out = p.stdout.readAll().toString();
+				p.close();
+				accept(Std.parseInt(StringTools.trim(out)));
+			} else {
+				final p = new sys.io.Process("stty", ["size"]);
+				final out = p.stdout.readAll().toString();
+				p.close();
+				final parts = StringTools.trim(out).split(" ");
+				if (parts.length == 2)
+					accept(Std.parseInt(parts[1]));
+			}
+		} catch (_:Dynamic) {}
+		return cachedWidth;
 	}
 
-	/** Length of the last status line drawn, used to blank out leftovers. **/
-	static var lastStatusLength = 0;
+	/** Renders a solid `━` bar of `width` columns filled to `fraction` (0-1). **/
+	static function solidBar(fraction:Float, width:Int):String {
+		if (fraction < 0) fraction = 0;
+		if (fraction > 1) fraction = 1;
+		final filled = Math.round(fraction * width);
+		// filled part in pink, remaining track in dim grey, matching pip
+		return paint("249;38;114", repeatStr(BAR_FILL, filled))
+			+ paint("88;91;112", repeatStr(BAR_TRACK, width - filled));
+	}
+
+	/** Renders an indeterminate "pulse" bar with a block sweeping across it. **/
+	static function pulseBar(width:Int):String {
+		final seg = Std.int(width / 4);
+		final pos = pulseFrame++ % (width + seg) - seg;
+		final buf = new StringBuf();
+		for (i in 0...width)
+			buf.add(paint(i >= pos && i < pos + seg ? "249;38;114" : "88;91;112", BAR_FILL));
+		return buf.toString();
+	}
 
 	/**
-		Redraws the current console line with `line`.
+		Draws an indented bar followed by `stats` across the full terminal width.
 
-		Uses `\r` + space padding rather than ANSI escape codes, so it works
-		on consoles without VT support (e.g. legacy Windows conhost).
+		`statsVisibleLen` is the printable length of `stats` (excluding any colour
+		codes) so the line can be cleared correctly on the next redraw.
 	**/
-	static function reprintLine(line:String) {
-		Sys.print("\r" + StringTools.rpad(line, " ", lastStatusLength));
-		lastStatusLength = line.length;
+	static function drawBar(bar:String, barWidth:Int, stats:String, statsVisibleLen:Int, finished:Bool) {
+		final line = "\r   " + bar + " " + stats;
+		final visibleLen = 3 + barWidth + 1 + statsVisibleLen;
+		Sys.print(line);
+		if (lastVisibleLen > visibleLen)
+			Sys.print(repeatStr(" ", lastVisibleLen - visibleLen));
+		if (finished) {
+			Sys.print("\n");
+			lastVisibleLen = 0;
+		} else {
+			lastVisibleLen = visibleLen;
+		}
 	}
 
-	/** Like `reprintLine`, but terminates the line: further output starts fresh. **/
-	static function finishLine(line:String) {
-		Sys.println("\r" + StringTools.rpad(line, " ", lastStatusLength));
-		lastStatusLength = 0;
+	static inline function barWidthFor(reserve:Int):Int {
+		final w = terminalWidth() - 4 - reserve;
+		return w < 10 ? 10 : w;
 	}
 
 	public static function printInstallStatus(_, current:Int, total:Int) {
-		if (current != total) {
-			final fraction = current / total;
-			final percent = Std.int(fraction * 100);
-			reprintLine('  ${progressBar(fraction)} $percent% (${current + 1}/$total files)');
-		} else {
-			// clear the bar
-			reprintLine("");
-			Sys.print("\r");
+		if (current == total) {
+			// clear the bar once installation finishes
+			if (lastVisibleLen > 0) {
+				Sys.print("\r" + repeatStr(" ", lastVisibleLen) + "\r");
+				lastVisibleLen = 0;
+			}
+			return;
 		}
+		final fraction = current / total;
+		final stats = '${Std.int(fraction * 100)}% (${current + 1}/$total files)';
+		final width = barWidthFor(stats.length);
+		drawBar(solidBar(fraction, width), width, stats, stats.length, false);
 	}
 
 	public static function printUploadStatus(pos:Int, total:Int) {
 		final fraction = pos / total;
-		reprintLine('  ${progressBar(fraction)} ${Std.int(fraction * 100)}% ${formatBytesPair(pos, total)}');
+		final stats = '${Std.int(fraction * 100)}% ${formatBytesPair(pos, total)}';
+		final width = barWidthFor(stats.length);
+		drawBar(solidBar(fraction, width), width, stats, stats.length, false);
 	}
 
 	public static function printDownloadStatus(label:String, finished:Bool, cur:Int, max:Null<Int>, downloaded:Int, time:Float) {
 		final speed = time > 0 ? downloaded / time : 0;
 		final speedStr = formatBytes(Std.int(speed)) + "/s";
+		// reserve a fixed slice for the stats so the bar length never jitters
+		final reserve = 40;
 
-		if (finished) {
-			finishLine('$label: ${formatBytes(downloaded)} in ${formatTime(time)} ($speedStr)');
+		if (finished && max != null) {
+			final stats = '${formatBytesPair(max, max)} $speedStr eta ${formatClock(0)}';
+			final width = barWidthFor(reserve);
+			drawBar(solidBar(1, width), width, StringTools.rpad(stats, " ", reserve), reserve, true);
+		} else if (finished) {
+			final stats = '${formatBytes(downloaded)} $speedStr in ${formatClock(time)}';
+			final width = barWidthFor(reserve);
+			drawBar(solidBar(1, width), width, StringTools.rpad(stats, " ", reserve), reserve, true);
 		} else if (max == null) {
-			// total size unknown: spinner + running byte count so it visibly moves
-			reprintLine('$label ${spinner()} ${formatBytes(cur)} $speedStr ${formatTime(time)}');
+			// total size unknown: sweeping pulse + running byte count
+			final stats = '${formatBytes(cur)} $speedStr ${formatClock(time)}';
+			final width = barWidthFor(reserve);
+			drawBar(pulseBar(width), width, StringTools.rpad(stats, " ", reserve), reserve, false);
 		} else {
 			final fraction = cur / max;
-			final percent = Std.int(fraction * 100);
-			final etaStr = speed > 0 ? formatTime((max - cur) / speed) : "-:--";
-			reprintLine('$label ${progressBar(fraction)} $percent% ${formatBytesPair(cur, max)} $speedStr eta $etaStr');
+			final etaStr = speed > 0 ? formatClock((max - cur) / speed) : "0:00:00";
+			final stats = '${formatBytesPair(cur, max)} $speedStr eta $etaStr';
+			final width = barWidthFor(reserve);
+			drawBar(solidBar(fraction, width), width, StringTools.rpad(stats, " ", reserve), reserve, false);
 		}
 	}
 
