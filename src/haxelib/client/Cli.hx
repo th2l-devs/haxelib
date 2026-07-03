@@ -108,32 +108,29 @@ class Cli {
 	/**
 		Whether ANSI colours are emitted.
 
-		Classic Windows console (conhost) does not process ANSI escape codes
-		unless virtual-terminal mode is enabled, so emitting them there would
-		print raw garbage like `←[38;2;…m`. We therefore only enable colour on
-		terminals known to support it (Windows Terminal, ConEmu, ansicon, or any
-		unix-style terminal), and default to off on bare Windows consoles.
-
-		Honours `NO_COLOR` (force off) and `HAXELIB_COLOR`/`FORCE_COLOR` (force on).
+		Classic Windows console (conhost) doesn't process ANSI codes unless
+		virtual-terminal mode is enabled, so we enable it explicitly (see
+		`detectConsole`) and only turn colour on when we're actually attached to
+		a console. Honours `NO_COLOR` (off) and `HAXELIB_COLOR`/`FORCE_COLOR` (on).
 	**/
-	static final useColor:Bool = computeUseColor();
+	static function useColor():Bool {
+		detectConsole();
+		return cachedColor;
+	}
 
-	static function computeUseColor():Bool {
+	static var cachedColor:Bool = false;
+
+	/** Resolves colour overrides that don't need a console probe. Null = "probe". **/
+	static function colorOverride():Null<Bool> {
 		if (Sys.getEnv("NO_COLOR") != null)
 			return false;
 		if (Sys.getEnv("HAXELIB_COLOR") != null || Sys.getEnv("FORCE_COLOR") != null)
 			return true;
 		if (Sys.systemName() != "Windows")
 			return true; // unix terminals handle ANSI
-		// Windows: only terminals that advertise ANSI support
-		if (Sys.getEnv("WT_SESSION") != null) // Windows Terminal
+		if (Sys.getEnv("WT_SESSION") != null || Sys.getEnv("ConEmuANSI") == "ON" || Sys.getEnv("ANSICON") != null)
 			return true;
-		if (Sys.getEnv("ConEmuANSI") == "ON") // ConEmu / Cmder
-			return true;
-		if (Sys.getEnv("ANSICON") != null) // ansicon
-			return true;
-		final term = Sys.getEnv("TERM"); // mintty / git-bash / cygwin
-		return term != null && term != "" && term != "dumb";
+		return null;
 	}
 
 	/** Frame counter used to animate the pulse shown when the total is unknown. **/
@@ -182,7 +179,7 @@ class Cli {
 	}
 
 	static inline function paint(rgb:String, s:String):String
-		return useColor ? '$ESC[38;2;${rgb}m$s$ESC[0m' : s;
+		return useColor() ? '$ESC[38;2;${rgb}m$s$ESC[0m' : s;
 
 	/** Repeats `s` `n` times (safe for multi-byte glyphs). **/
 	static function repeatStr(s:String, n:Int):String {
@@ -198,8 +195,15 @@ class Cli {
 	}
 
 	/**
-		Best-effort, one-time detection of the console width and whether it can
-		render UTF-8 box-drawing characters. Falls back to 80 columns / ASCII.
+		One-time console probe, run before any styled output. On Windows it:
+
+		- enables virtual-terminal (ANSI) processing on the real console via
+		  `CONOUT$`, so escape codes are rendered instead of printed raw;
+		- reports the visible width and output code page (so we know whether the
+		  UTF-8 bar glyph is safe), or nothing at all when there is no console
+		  (output redirected to a file/pipe) - in which case colour stays off.
+
+		Falls back to 80 columns / ASCII / no colour if anything fails.
 	**/
 	static function detectConsole():Void {
 		if (cachedUnicode != null)
@@ -214,6 +218,9 @@ class Cli {
 		if (forceUnicode)
 			cachedUnicode = true;
 
+		final colorForced = colorOverride();
+		cachedColor = colorForced != null ? colorForced : false;
+
 		inline function acceptWidth(n:Null<Int>):Bool {
 			if (n != null && n >= 20) {
 				cachedWidth = n > 200 ? 200 : n;
@@ -225,20 +232,33 @@ class Cli {
 		var haveWidth = acceptWidth(Std.parseInt(Sys.getEnv("COLUMNS") ?? ""));
 		try {
 			if (isWindows) {
-				// one call gives us both the width and the active output code page.
-				// use the smaller of window/buffer width - if the buffer is wider than
-				// the visible window, rendering to the buffer width would wrap.
-				final p = new sys.io.Process("powershell",
-					["-NoProfile", "-NonInteractive", "-Command",
-						"[Math]::Min([Console]::WindowWidth, [Console]::BufferWidth); [Console]::OutputEncoding.CodePage"]);
+				// enable ANSI on the real console (CONOUT$), then print the visible
+				// width and the output code page - or nothing if there's no console.
+				final csharp =
+					"[DllImport(\"kernel32.dll\",SetLastError=true)]public static extern System.IntPtr CreateFileW(string n,uint a,uint s,System.IntPtr se,uint d,uint f,System.IntPtr t);"
+					+ "[DllImport(\"kernel32.dll\")]public static extern bool GetConsoleMode(System.IntPtr h,out uint m);"
+					+ "[DllImport(\"kernel32.dll\")]public static extern bool SetConsoleMode(System.IntPtr h,uint m);";
+				final psCmd =
+					"$s='" + csharp + "';"
+					+ "try{$k=Add-Type -MemberDefinition $s -Name Vt -Namespace HxVt -PassThru -ErrorAction Stop;"
+					+ "$h=$k::CreateFileW('CONOUT$',0x40000000,3,[System.IntPtr]::Zero,3,0,[System.IntPtr]::Zero);"
+					+ "$m=0;if($k::GetConsoleMode($h,[ref]$m)){[void]$k::SetConsoleMode($h,($m -bor 4))}}catch{};"
+					+ "try{[Math]::Min([Console]::WindowWidth,[Console]::BufferWidth)}catch{'x'};"
+					+ "try{[Console]::OutputEncoding.CodePage}catch{'x'}";
+				final p = new sys.io.Process("powershell", ["-NoProfile", "-NonInteractive", "-Command", psCmd]);
 				final out = StringTools.replace(p.stdout.readAll().toString(), "\r", "");
 				p.close();
 				final lines = out.split("\n").filter(l -> StringTools.trim(l) != "");
-				if (!haveWidth && lines.length >= 1)
-					acceptWidth(Std.parseInt(StringTools.trim(lines[0])));
+				final width = lines.length >= 1 ? Std.parseInt(StringTools.trim(lines[0])) : null;
+				final consolePresent = width != null && width > 0;
+				if (!haveWidth && consolePresent)
+					acceptWidth(width);
 				// code page 65001 == UTF-8; only then are box-drawing glyphs safe
 				if (!forceUnicode && Sys.getEnv("HAXELIB_NO_UNICODE") == null && lines.length >= 2)
 					cachedUnicode = Std.parseInt(StringTools.trim(lines[1])) == 65001;
+				// with no override, colour is on only when attached to a real console
+				if (colorForced == null)
+					cachedColor = consolePresent;
 			} else if (!haveWidth) {
 				final p = new sys.io.Process("stty", ["size"]);
 				final out = p.stdout.readAll().toString();
