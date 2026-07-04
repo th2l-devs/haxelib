@@ -105,33 +105,26 @@ class Cli {
 
 	static final ESC = "\x1b";
 
+	//
+	// Colour codes. Deliberately simple/basic ANSI (16-colour + a couple of
+	// 256-colour greys) rather than 24-bit truecolor, since classic Windows
+	// consoles render these far more reliably.
+	//
+	static inline final C_GRAY = "38;5;7"; // info
+	static inline final C_DIM = "38;5;8"; // debug / credit / bar track
+	static inline final C_YELLOW = "33"; // warn
+	static inline final C_RED = "31"; // error
+	static inline final C_MAGENTA = "38;5;205"; // bar fill (256-colour pink)
+
 	/**
-		Whether ANSI colours are emitted.
-
-		Classic Windows console (conhost) doesn't process ANSI codes unless
-		virtual-terminal mode is enabled, so we enable it explicitly (see
-		`detectConsole`) and only turn colour on when we're actually attached to
-		a console. Honours `NO_COLOR` (off) and `HAXELIB_COLOR`/`FORCE_COLOR` (on).
+		Whether ANSI colours are emitted. On by default; set `NO_COLOR` to disable.
+		On Windows we still enable virtual-terminal mode (see `detectConsole`) so
+		the codes actually render instead of printing raw.
 	**/
-	static function useColor():Bool {
-		detectConsole();
-		return cachedColor;
-	}
+	static final colorOn:Bool = Sys.getEnv("NO_COLOR") == null;
 
-	static var cachedColor:Bool = false;
-
-	/** Resolves colour overrides that don't need a console probe. Null = "probe". **/
-	static function colorOverride():Null<Bool> {
-		if (Sys.getEnv("NO_COLOR") != null)
-			return false;
-		if (Sys.getEnv("HAXELIB_COLOR") != null || Sys.getEnv("FORCE_COLOR") != null)
-			return true;
-		if (Sys.systemName() != "Windows")
-			return true; // unix terminals handle ANSI
-		if (Sys.getEnv("WT_SESSION") != null || Sys.getEnv("ConEmuANSI") == "ON" || Sys.getEnv("ANSICON") != null)
-			return true;
-		return null;
-	}
+	static inline function useColor():Bool
+		return colorOn;
 
 	/** Frame counter used to animate the pulse shown when the total is unknown. **/
 	static var pulseFrame = 0;
@@ -178,8 +171,12 @@ class Cli {
 		return '$h:${pad(m)}:${pad(s)}';
 	}
 
-	static inline function paint(rgb:String, s:String):String
-		return useColor() ? '$ESC[38;2;${rgb}m$s$ESC[0m' : s;
+	static inline function paint(code:String, s:String):String {
+		if (!useColor())
+			return s;
+		detectConsole(); // make sure VT mode is on (Windows) before we emit codes
+		return '$ESC[${code}m$s$ESC[0m';
+	}
 
 	/** Repeats `s` `n` times (safe for multi-byte glyphs). **/
 	static function repeatStr(s:String, n:Int):String {
@@ -218,9 +215,6 @@ class Cli {
 		if (forceUnicode)
 			cachedUnicode = true;
 
-		final colorForced = colorOverride();
-		cachedColor = colorForced != null ? colorForced : false;
-
 		inline function acceptWidth(n:Null<Int>):Bool {
 			if (n != null && n >= 20) {
 				cachedWidth = n > 200 ? 200 : n;
@@ -256,9 +250,6 @@ class Cli {
 				// code page 65001 == UTF-8; only then are box-drawing glyphs safe
 				if (!forceUnicode && Sys.getEnv("HAXELIB_NO_UNICODE") == null && lines.length >= 2)
 					cachedUnicode = Std.parseInt(StringTools.trim(lines[1])) == 65001;
-				// with no override, colour is on only when attached to a real console
-				if (colorForced == null)
-					cachedColor = consolePresent;
 			} else if (!haveWidth) {
 				final p = new sys.io.Process("stty", ["size"]);
 				final out = p.stdout.readAll().toString();
@@ -276,8 +267,8 @@ class Cli {
 		if (fraction > 1) fraction = 1;
 		final filled = Math.round(fraction * width);
 		// filled part in pink, remaining track in dim grey, matching pip
-		return paint("249;38;114", repeatStr(barFill(), filled))
-			+ paint("88;91;112", repeatStr(barTrack(), width - filled));
+		return paint(C_MAGENTA, repeatStr(barFill(), filled))
+			+ paint(C_DIM, repeatStr(barTrack(), width - filled));
 	}
 
 	/** Renders an indeterminate "pulse" bar with a block sweeping across it. **/
@@ -287,7 +278,7 @@ class Cli {
 		final glyph = barFill();
 		final buf = new StringBuf();
 		for (i in 0...width)
-			buf.add(paint(i >= pos && i < pos + seg ? "249;38;114" : "88;91;112", glyph));
+			buf.add(paint(i >= pos && i < pos + seg ? C_MAGENTA : C_DIM, glyph));
 		return buf.toString();
 	}
 
@@ -455,16 +446,16 @@ class Cli {
 	}
 
 	static inline function infoTag(msg:String):String
-		return tagged("INFO", "120;120;135", msg); // dark grey
+		return tagged("INFO", C_GRAY, msg); // dark grey
 
 	static inline function warnTag(msg:String):String
-		return tagged("WARN", "220;180;70", msg); // amber
+		return tagged("WARN", C_YELLOW, msg); // amber
 
 	static inline function errorTag(msg:String):String
-		return tagged("ERROR", "225;80;80", msg); // red
+		return tagged("ERROR", C_RED, msg); // red
 
 	static inline function debugTag(msg:String):String
-		return tagged("DEBUG", "95;95;110", msg); // dim grey
+		return tagged("DEBUG", C_DIM, msg); // dim grey
 
 	/** Human facing info line, tagged `[INFO]`. **/
 	public static inline function print(str:String)
@@ -476,7 +467,7 @@ class Cli {
 
 	/** Dimmed line with no tag (credits, subtle notes). **/
 	public static inline function printDim(str:String)
-		Sys.println(paint("110;110;120", str));
+		Sys.println(paint(C_DIM, str));
 
 	public static inline function printString(str:String)
 		Sys.print(str);
