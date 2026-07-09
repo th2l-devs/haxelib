@@ -171,6 +171,21 @@ class Cli {
 		return '$h:${pad(m)}:${pad(s)}';
 	}
 
+	/** Compact elapsed time, e.g. `7s`, `1:05`, `1:02:03`. **/
+	static function formatElapsed(seconds:Float):String {
+		var total = Std.int(seconds);
+		if (total < 0)
+			total = 0;
+		inline function pad(n:Int) return n < 10 ? '0$n' : '$n';
+		if (total < 60)
+			return '${total}s';
+		final m = Std.int(total / 60) % 60;
+		final s = total % 60;
+		if (total < 3600)
+			return '$m:${pad(s)}';
+		return '${Std.int(total / 3600)}:${pad(m)}:${pad(s)}';
+	}
+
 	static inline function paint(code:String, s:String):String {
 		if (!useColor())
 			return s;
@@ -339,26 +354,24 @@ class Cli {
 	public static function printDownloadStatus(label:String, finished:Bool, cur:Int, max:Null<Int>, downloaded:Int, time:Float) {
 		final speed = time > 0 ? downloaded / time : 0;
 		final speedStr = formatBytes(Std.int(speed)) + "/s";
+		final elapsed = formatElapsed(time); // seconds spent so far
 		// reserve a fixed slice for the stats so the bar length never jitters
-		final reserve = 40;
+		final reserve = 46;
 
-		if (finished && max != null) {
-			final stats = '${formatBytesPair(max, max)} $speedStr eta ${formatClock(0)}';
-			final width = barWidthFor(reserve);
-			drawBar(solidBar(1, width), width, StringTools.rpad(stats, " ", reserve), reserve, true);
-		} else if (finished) {
-			final stats = '${formatBytes(downloaded)} $speedStr in ${formatClock(time)}';
+		if (finished) {
+			final size = max != null ? formatBytesPair(max, max) : formatBytes(downloaded);
+			final stats = '$size $speedStr in $elapsed';
 			final width = barWidthFor(reserve);
 			drawBar(solidBar(1, width), width, StringTools.rpad(stats, " ", reserve), reserve, true);
 		} else if (max == null) {
-			// total size unknown: sweeping pulse + running byte count
-			final stats = '${formatBytes(cur)} $speedStr ${formatClock(time)}';
+			// total size unknown: sweeping pulse + running byte count + elapsed
+			final stats = '${formatBytes(cur)} $speedStr $elapsed';
 			final width = barWidthFor(reserve);
 			drawBar(pulseBar(width), width, StringTools.rpad(stats, " ", reserve), reserve, false);
 		} else {
 			final fraction = cur / max;
 			final etaStr = speed > 0 ? formatClock((max - cur) / speed) : "0:00:00";
-			final stats = '${formatBytesPair(cur, max)} $speedStr eta $etaStr';
+			final stats = '${formatBytesPair(cur, max)} $speedStr $elapsed eta $etaStr';
 			final width = barWidthFor(reserve);
 			drawBar(solidBar(fraction, width), width, StringTools.rpad(stats, " ", reserve), reserve, false);
 		}
@@ -374,9 +387,12 @@ class Cli {
 	//
 
 	static var gitBuf = "";
+	static var gitStart = -1.0;
 	static final gitPhaseEReg = ~/(Receiving objects|Resolving deltas|Compressing objects|Counting objects):\s+(\d+)% \((\d+)\/(\d+)\)/;
 
 	public static function printVcsProgress(chunk:String) {
+		if (gitStart < 0)
+			gitStart = haxe.Timer.stamp();
 		gitBuf += chunk;
 		// git separates progress updates with \r and finished lines with \n
 		while (true) {
@@ -410,8 +426,9 @@ class Cli {
 			if (ci != -1)
 				detail = StringTools.replace(seg.substring(ci + 3), ", done.", "");
 		}
-		final reserve = 44;
-		var stats = '$label $pct%  $detail';
+		final elapsed = formatElapsed(haxe.Timer.stamp() - gitStart); // seconds spent so far
+		final reserve = 50;
+		var stats = '$label $pct%  $detail  $elapsed';
 		if (stats.length > reserve)
 			stats = stats.substr(0, reserve);
 		final width = barWidthFor(reserve);
@@ -420,6 +437,7 @@ class Cli {
 
 	public static function finishVcsProgress() {
 		gitBuf = "";
+		gitStart = -1.0;
 		if (lastVisibleLen > 0) {
 			Sys.print("\n");
 			lastVisibleLen = 0;
