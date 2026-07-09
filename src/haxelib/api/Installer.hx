@@ -954,11 +954,28 @@ class Installer {
 				}
 				FsUtils.deleteRec(libPath);
 				doVcsClone();
-			} else if (!wasUpdated && FsUtils.runInDirectory(libPath, vcs.checkRemoteChanges)) {
-				userInterface.log('Updating $library version $id...');
-				updateVcs(library, id, vcs);
 			} else {
-				userInterface.log('Library $library version $id already up to date');
+				// checking/pulling remote changes can fail (network down, auth
+				// rejected, repo moved/deleted); surface that cleanly instead of
+				// dumping the raw VcsError enum.
+				try {
+					if (!wasUpdated && FsUtils.runInDirectory(libPath, vcs.checkRemoteChanges)) {
+						userInterface.log('Updating $library version $id...');
+						updateVcs(library, id, vcs);
+					} else {
+						userInterface.log('Library $library version $id already up to date');
+					}
+				} catch (e:VcsError) {
+					switch (e) {
+						case CommandTimedOut(_, seconds):
+							throw 'Could not reach the ${id.getName()} repository for $library (no response for ${seconds}s).';
+						case CommandFailed(_, _, _, stderr):
+							throw 'Could not check for updates to $library:\n'
+								+ (stderr != null && stderr != "" ? stderr : "the repository could not be reached.");
+						default:
+							throw 'Could not update $library from its ${id.getName()} repository.';
+					}
+				}
 			}
 		} else {
 			FsUtils.safeDir(libPath);

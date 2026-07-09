@@ -420,11 +420,16 @@ class Git extends Vcs {
 	}
 
 	/**
-		Forces git to emit its progress meter even though stderr is a pipe,
-		so that it can be streamed to the user via `progressOutput`.
+		Forces git to emit its progress meter even though stderr is a pipe.
+
+		This is always added (not just when displaying progress): without it git
+		is completely silent during the transfer, which the stall watchdog would
+		misread as a hang and abort a perfectly healthy download. The meter gives
+		the watchdog a heartbeat; whether it is shown is decided separately by
+		`progressOutput`.
 	**/
 	inline function withProgressFlag(args:Array<String>):Array<String> {
-		if (progressOutput != null)
+		if (stallTimeout > 0 || progressOutput != null)
 			args.push("--progress");
 		return args;
 	}
