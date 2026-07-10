@@ -159,19 +159,7 @@ class Cli {
 		return '${Unit.convertFromBytes(cur, unit)}/${Unit.convertFromBytes(max, unit)} $unit';
 	}
 
-	/** Formats a duration in seconds as `h:mm:ss`, e.g. `0:00:07` (pip style). **/
-	static function formatClock(seconds:Float):String {
-		var total = Std.int(seconds);
-		if (total < 0)
-			total = 0;
-		final h = Std.int(total / 3600);
-		final m = Std.int((total % 3600) / 60);
-		final s = total % 60;
-		inline function pad(n:Int) return n < 10 ? '0$n' : '$n';
-		return '$h:${pad(m)}:${pad(s)}';
-	}
-
-	/** Compact elapsed time, e.g. `7s`, `1:05`, `1:02:03`. **/
+	/** Compact duration, e.g. `7s`, `1:05`, `1:02:03`. **/
 	static function formatElapsed(seconds:Float):String {
 		var total = Std.int(seconds);
 		if (total < 0)
@@ -303,18 +291,90 @@ class Cli {
 		`statsVisibleLen` is the printable length of `stats` (excluding any colour
 		codes) so the line can be cleared correctly on the next redraw.
 	**/
-	static function drawBar(bar:String, barWidth:Int, stats:String, statsVisibleLen:Int, finished:Bool) {
-		final line = "\r   " + bar + " " + stats;
-		final visibleLen = 3 + barWidth + 1 + statsVisibleLen;
-		Sys.print(line);
+	//
+	// The status line is written from two threads: the main one (progress bars)
+	// and the spinner's ticker. Every write goes through `consoleLock`.
+	//
+	static final consoleLock = new sys.thread.Mutex();
+
+	/** Redraws the status line in place. Caller must hold `consoleLock`. **/
+	static function drawStatusLine(line:String, visibleLen:Int) {
+		Sys.print("\r" + line);
+		// blank whatever the previous, longer line left behind
 		if (lastVisibleLen > visibleLen)
 			Sys.print(repeatStr(" ", lastVisibleLen - visibleLen));
+		lastVisibleLen = visibleLen;
+	}
+
+	/** Wipes the status line. Caller must hold `consoleLock`. **/
+	static function clearStatusLine() {
+		if (lastVisibleLen > 0) {
+			Sys.print("\r" + repeatStr(" ", lastVisibleLen) + "\r");
+			lastVisibleLen = 0;
+		}
+	}
+
+	static function drawBar(bar:String, barWidth:Int, stats:String, statsVisibleLen:Int, finished:Bool) {
+		consoleLock.acquire();
+		drawStatusLine("   " + bar + " " + stats, 3 + barWidth + 1 + statsVisibleLen);
 		if (finished) {
 			Sys.print("\n");
 			lastVisibleLen = 0;
-		} else {
-			lastVisibleLen = visibleLen;
 		}
+		consoleLock.release();
+	}
+
+	//
+	// ── Spinner ──────────────────────────────────────────────────────────────
+	//
+	// Shown while a long operation is running but producing no measurable
+	// progress yet (e.g. git waiting on the server to build the pack). A ticker
+	// thread animates it, since nothing else redraws during that silence.
+	//
+
+	static final SPINNER_UNICODE = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+	static final SPINNER_ASCII = ["|", "/", "-", "\\"];
+
+	static var spinnerActive = false;
+	static var spinnerFrameIdx = 0;
+
+	/** Starts animating a spinner labelled `label`. No-op if one is running. **/
+	public static function startSpinner(label:String) {
+		// resolve the console probe on this thread; the ticker must not be the
+		// first caller (it spawns a process to detect the console)
+		final frames = unicodeEnabled() ? SPINNER_UNICODE : SPINNER_ASCII;
+
+		consoleLock.acquire();
+		final alreadyRunning = spinnerActive;
+		spinnerActive = true;
+		consoleLock.release();
+		if (alreadyRunning)
+			return;
+
+		sys.thread.Thread.create(function() {
+			while (true) {
+				consoleLock.acquire();
+				// re-check under the lock so we never draw after stopSpinner()
+				if (!spinnerActive) {
+					consoleLock.release();
+					break;
+				}
+				final frame = frames[spinnerFrameIdx++ % frames.length];
+				drawStatusLine('   ${paint(C_MAGENTA, frame)} $label', 3 + 1 + 1 + label.length);
+				consoleLock.release();
+				Sys.sleep(0.1);
+			}
+		});
+	}
+
+	/** Stops the spinner and wipes its line. Safe to call when not running. **/
+	public static function stopSpinner() {
+		consoleLock.acquire();
+		if (spinnerActive) {
+			spinnerActive = false;
+			clearStatusLine();
+		}
+		consoleLock.release();
 	}
 
 	/** Preferred (compact) width of the bar itself, in columns. **/
@@ -332,10 +392,9 @@ class Cli {
 	public static function printInstallStatus(_, current:Int, total:Int) {
 		if (current == total) {
 			// clear the bar once installation finishes
-			if (lastVisibleLen > 0) {
-				Sys.print("\r" + repeatStr(" ", lastVisibleLen) + "\r");
-				lastVisibleLen = 0;
-			}
+			consoleLock.acquire();
+			clearStatusLine();
+			consoleLock.release();
 			return;
 		}
 		final fraction = current / total;
@@ -354,24 +413,24 @@ class Cli {
 	public static function printDownloadStatus(label:String, finished:Bool, cur:Int, max:Null<Int>, downloaded:Int, time:Float) {
 		final speed = time > 0 ? downloaded / time : 0;
 		final speedStr = formatBytes(Std.int(speed)) + "/s";
-		final elapsed = formatElapsed(time); // seconds spent so far
 		// reserve a fixed slice for the stats so the bar length never jitters
-		final reserve = 46;
+		final reserve = 42;
 
 		if (finished) {
+			// on completion, report the total time the download took
 			final size = max != null ? formatBytesPair(max, max) : formatBytes(downloaded);
-			final stats = '$size $speedStr in $elapsed';
+			final stats = '$size $speedStr in ${formatElapsed(time)}';
 			final width = barWidthFor(reserve);
 			drawBar(solidBar(1, width), width, StringTools.rpad(stats, " ", reserve), reserve, true);
 		} else if (max == null) {
-			// total size unknown: sweeping pulse + running byte count + elapsed
-			final stats = '${formatBytes(cur)} $speedStr $elapsed';
+			// total size unknown, so no eta can be computed: show bytes so far
+			final stats = '${formatBytes(cur)} $speedStr';
 			final width = barWidthFor(reserve);
 			drawBar(pulseBar(width), width, StringTools.rpad(stats, " ", reserve), reserve, false);
 		} else {
 			final fraction = cur / max;
-			final etaStr = speed > 0 ? formatClock((max - cur) / speed) : "0:00:00";
-			final stats = '${formatBytesPair(cur, max)} $speedStr $elapsed eta $etaStr';
+			final etaStr = speed > 0 ? formatElapsed((max - cur) / speed) : "?";
+			final stats = '${formatBytesPair(cur, max)} $speedStr eta $etaStr';
 			final width = barWidthFor(reserve);
 			drawBar(solidBar(fraction, width), width, StringTools.rpad(stats, " ", reserve), reserve, false);
 		}
@@ -391,8 +450,12 @@ class Cli {
 	static final gitPhaseEReg = ~/(Receiving objects|Resolving deltas|Compressing objects|Counting objects):\s+(\d+)% \((\d+)\/(\d+)\)/;
 
 	public static function printVcsProgress(chunk:String) {
-		if (gitStart < 0)
+		if (gitStart < 0) {
 			gitStart = haxe.Timer.stamp();
+			// git goes silent while the server builds the pack - spin until it
+			// starts reporting real progress, so it doesn't look frozen
+			startSpinner("Waiting for remote...");
+		}
 		gitBuf += chunk;
 		// git separates progress updates with \r and finished lines with \n
 		while (true) {
@@ -426,22 +489,30 @@ class Cli {
 			if (ci != -1)
 				detail = StringTools.replace(seg.substring(ci + 3), ", done.", "");
 		}
-		final elapsed = formatElapsed(haxe.Timer.stamp() - gitStart); // seconds spent so far
-		final reserve = 50;
-		var stats = '$label $pct%  $detail  $elapsed';
+		// estimate the remaining time from how long the completed share took
+		final secs = haxe.Timer.stamp() - gitStart;
+		final etaStr = pct > 0 && pct < 100 ? "  eta " + formatElapsed(secs * (100 - pct) / pct) : "";
+		final reserve = 48;
+		var stats = '$label $pct%  $detail$etaStr';
 		if (stats.length > reserve)
 			stats = stats.substr(0, reserve);
 		final width = barWidthFor(reserve);
+		// real progress arrived: the bar takes over the status line
+		stopSpinner();
 		drawBar(solidBar(pct / 100, width), width, StringTools.rpad(stats, " ", reserve), reserve, false);
 	}
 
 	public static function finishVcsProgress() {
+		stopSpinner(); // clears the line if the spinner was still up
 		gitBuf = "";
 		gitStart = -1.0;
+		consoleLock.acquire();
+		// terminate the bar's line, if one was drawn
 		if (lastVisibleLen > 0) {
 			Sys.print("\n");
 			lastVisibleLen = 0;
 		}
+		consoleLock.release();
 	}
 
 	public static function getInput(prompt:String): String {

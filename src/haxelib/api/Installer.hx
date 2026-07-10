@@ -853,6 +853,13 @@ class Installer {
 		userInterface.logInstallationProgress('Done installing $library $version', total, total);
 	}
 
+	/** Abbreviates a commit hash for display, e.g. `a1b2c3d`. **/
+	static function shortRef(ref:Null<String>):String {
+		if (ref == null || ref == "")
+			return "?";
+		return ref.length > 7 ? ref.substr(0, 7) : ref;
+	}
+
 	function getVcs(id:VcsID):Vcs {
 		final vcs = Vcs.create(id, userInterface.log.bind(_, Debug), userInterface.log.bind(_, Optional));
 		if (vcs == null || !vcs.available)
@@ -960,10 +967,18 @@ class Installer {
 				// dumping the raw VcsError enum.
 				try {
 					if (!wasUpdated && FsUtils.runInDirectory(libPath, vcs.checkRemoteChanges)) {
+						// report which commit we're moving to before pulling it in
+						final oldRef = FsUtils.runInDirectory(libPath, vcs.getRef);
+						final newRef = FsUtils.runInDirectory(libPath, vcs.getRemoteRef);
+						if (newRef != null)
+							userInterface.log('New commit available for $library: ${shortRef(oldRef)} -> ${shortRef(newRef)}');
+						else
+							userInterface.log('New changes available for $library');
 						userInterface.log('Updating $library version $id...');
 						updateVcs(library, id, vcs);
 					} else {
-						userInterface.log('Library $library version $id already up to date');
+						final ref = FsUtils.runInDirectory(libPath, vcs.getRef);
+						userInterface.log('Library $library version $id already up to date (${shortRef(ref)})');
 					}
 				} catch (e:VcsError) {
 					switch (e) {

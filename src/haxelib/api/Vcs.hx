@@ -63,6 +63,13 @@ private interface IVcs {
 
 	function getRef():String;
 
+	/**
+		Returns the commit the tracked remote branch points at, as known locally
+		(i.e. after a `checkRemoteChanges` fetch), or `null` if it can't be
+		determined (detached head, or unsupported by the vcs).
+	**/
+	function getRemoteRef():Null<String>;
+
 	function getOriginUrl():String;
 
 	function getBranchName():Null<String>;
@@ -405,7 +412,9 @@ class Git extends Vcs {
 	}
 
 	public function checkRemoteChanges():Bool {
-		run(["fetch", "--depth=1"], true);
+		// streamed: this fetch is the actual download of an update, so it gets
+		// the progress bar and the stall watchdog just like a clone does
+		runStreamed(withProgressFlag(["fetch", "--depth=1"]), true);
 
 		// `git rev-parse @{u}` will fail if detached
 		final checkUpstream = run(["rev-parse", "@{u}"]);
@@ -417,6 +426,14 @@ class Git extends Vcs {
 
 	public function mergeRemoteChanges() {
 		run(["reset", "--hard", "@{u}"], true);
+	}
+
+	public function getRemoteRef():Null<String> {
+		// `@{u}` fails when the head is detached (e.g. installed at a fixed commit)
+		final ret = run(["rev-parse", "@{u}"]);
+		if (ret.code != 0)
+			return null;
+		return ret.out.trim();
 	}
 
 	/**
@@ -435,7 +452,16 @@ class Git extends Vcs {
 	}
 
 	public function clone(libPath:String, data:VcsData, flat = false):Void {
-		final vcsArgs = ["clone", data.url, libPath];
+		// Speed-oriented git config, applied before the subcommand:
+		//  protocol.version=2 - fewer negotiation round-trips
+		//  gc.auto=0          - don't pause a big clone to garbage-collect
+		//  core.fscache=true  - faster filesystem access on Windows
+		final vcsArgs = [
+			"-c", "protocol.version=2",
+			"-c", "gc.auto=0",
+			"-c", "core.fscache=true",
+			"clone", data.url, libPath
+		];
 
 		optionalLog('Cloning ${VcsID.Git.getName()} from ${data.url}');
 
@@ -453,6 +479,10 @@ class Git extends Vcs {
 		if (cloneDepth1) {
 			vcsArgs.push('--depth=1');
 		}
+
+		// don't pull down the repo's (potentially huge) set of tags
+		if (data.tag == null)
+			vcsArgs.push('--no-tags');
 
 		final ret = runStreamed(withProgressFlag(vcsArgs));
 		if (ret.code != 0)
@@ -484,7 +514,8 @@ class Git extends Vcs {
 				run(["submodule", "sync", "--recursive"]);
 
 				optionalLog('Downloading/updating submodules for ${VcsID.Git.getName()}');
-				final ret = runStreamed(withProgressFlag(["submodule", "update", "--init", "--recursive", "--depth=1", "--single-branch"]));
+				// --jobs downloads multiple submodules in parallel
+				final ret = runStreamed(withProgressFlag(["submodule", "update", "--init", "--recursive", "--depth=1", "--single-branch", "--jobs=8"]));
 				if (ret.code != 0)
 				{
 					throw VcsError.SubmoduleError(this, data.url, ret.err);
@@ -617,6 +648,12 @@ class Mercurial extends Vcs {
 		if (StringTools.endsWith(out, "+"))
 			return out.substr(0, out.length - 2);
 		return out;
+	}
+
+	public function getRemoteRef():Null<String> {
+		// mercurial has no directly equivalent "upstream ref"; callers fall back
+		// to a message without commit hashes
+		return null;
 	}
 
 	public function getOriginUrl():String {
