@@ -582,8 +582,16 @@ class Main {
 		final input = argsIterator.next();
 		final scope = getScope();
 		final installer = setupAndGetInstaller(scope);
-		if (input == null)
+
+		if (input == null) {
+			if (flags.contains(Check)) {
+				final updates = installer.checkForUpdates();
+				printUpdateReport(updates);
+				Sys.exit(updates.exists(u -> !u.upToDate) ? 1 : 0);
+				return;
+			}
 			return installer.updateAll();
+		}
 
 		final library = ProjectName.ofString(input);
 
@@ -593,6 +601,25 @@ class Main {
 			return;
 		}
 		installer.update(library);
+	}
+
+	/** Prints the report produced by `Installer.checkForUpdates`. **/
+	function printUpdateReport(updates:Array<Installer.LibraryUpdateInfo>) {
+		if (updates.length == 0) {
+			Cli.print("No libraries installed.");
+			return;
+		}
+
+		for (u in updates) {
+			final status = if (u.upToDate) "up to date" else '${u.latest} available';
+			Cli.print('  ${StringTools.rpad(u.name, " ", 16)}${u.current}   $status');
+		}
+
+		final outdatedCount = updates.count(u -> !u.upToDate);
+		if (outdatedCount == 0)
+			Cli.print('All ${updates.length} libraries are up to date.');
+		else
+			Cli.printWarning('$outdatedCount update(s) available. Run `haxelib update` to install ${outdatedCount == 1 ? "it" : "them"}.');
 	}
 
 	function remove() {

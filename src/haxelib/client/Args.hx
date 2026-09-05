@@ -68,6 +68,8 @@ enum abstract Flag(String) to String {
 	final Flat = "flat";
 	final Always = "always";
 	final Never = "never";
+	@:alias("dry-run")
+	final Check = "check";
 	final System = "system";
 	final SkipDependencies = "skip-dependencies";
 	@:alias("notimeout")
@@ -234,6 +236,7 @@ class Args {
 		addSwitch(Flat, "do not use --recursive cloning for git");
 		addSwitch(Always, "answer all questions with yes");
 		addSwitch(Never, "answer all questions with no");
+		addSwitch(Check, "with 'update', report available updates without installing them");
 		addSwitch(System, "run bundled haxelib version instead of latest update");
 		addSwitch(SkipDependencies, "do not install dependencies");
 		addSwitch(NoTimeout, "disable timeout when connecting to server");

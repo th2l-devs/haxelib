@@ -5,9 +5,9 @@
 	"tags": ["haxelib", "core"],
 	"description": "The haxelib client",
 	"classPath": "src",
-	"version": "4.2.0",
-	"releasenote": " * Add `state save` and `state load` commands (#610)\n * Exit with error when hxml install fails (#625)\n * Allow compiling client with hxcpp target (#643)\n * Get compiler version for run scripts lazily (#646)\n * Change the order of haxelib git submodule installation (#638)\n * Fix crashes with git commands on Windows (#642)\n * Disallow library submissions containing .git folders (#664)",
-	"contributors": ["HaxeFoundation", "back2dos", "ncannasse", "jason", "Simn", "nadako", "andyli"],
+	"version": "4.3.0",
+	"releasenote": " * Redesign download/install progress display with colored bars, elapsed/eta and a spinner\n * Stream git's own progress instead of running it silently, with a stall watchdog and auto-retry\n * Recover automatically from a corrupted vcs install instead of crashing\n * Report the specific commit/version an update moves to, with `update --check` for a dry run\n * Tag console output with [INFO]/[WARN]/[ERROR]/[DEBUG]",
+	"contributors": ["HaxeFoundation", "back2dos", "ncannasse", "jason", "Simn", "nadako", "andyli", "Mr. Chaos"],
 	"dependencies":{
 		"hx3compat": "",
 		"hx4compat": "",

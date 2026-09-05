@@ -125,6 +125,22 @@ class UserInterface {
 	}
 }
 
+/**
+	Result of checking a single installed library for updates.
+
+	`current`/`latest` are display labels (a version number, or a short commit
+	hash for vcs installs) rather than raw data, since the two kinds of
+	install don't share a common "version" representation.
+**/
+typedef LibraryUpdateInfo = {
+	final name:ProjectName;
+	final versionData:VersionData;
+	final upToDate:Bool;
+	final current:String;
+	/** Label for the available update, or `null` when `upToDate` is `true`. **/
+	final ?latest:String;
+}
+
 private class InstallData {
 	public final name:ProjectName;
 	public final version:Version;
@@ -491,44 +507,112 @@ class Installer {
 				handleDependencies(library, latest);
 		}
 
+	/** Abbreviates a label for a row in the update report, e.g. `format`. **/
+	static function padName(name:ProjectName):String
+		return StringTools.rpad(name, " ", 16);
+
+	/**
+		Checks every library in the scope for updates, without installing any.
+
+		For a vcs install this involves an actual `fetch`/`pull` (there is no
+		way to know if new commits exist otherwise), so it is not free - but it
+		is also the same network cost `updateAll` would pay for that library
+		anyway, just performed up front instead of during the apply step.
+
+		A library that can't be checked (e.g. network failure) is skipped with
+		a message rather than aborting the whole scan.
+	**/
+	public function checkForUpdates():Array<LibraryUpdateInfo> {
+		final result = [];
+		for (rawName in scope.getLibraryNames()) {
+			try {
+				final versionData = scope.resolve(rawName);
+				final name = getCorrectName(rawName, versionData);
+				result.push(switch versionData {
+					case Haxelib(version):
+						final latest = Connection.getLatestVersion(name);
+						{
+							name: name,
+							versionData: versionData,
+							upToDate: version == latest,
+							current: '$version',
+							latest: version == latest ? null : '$latest'
+						};
+					case VcsInstall(id, _):
+						final vcs = getVcs(id);
+						final libPath = repository.getVersionPath(name, id);
+						final hasChanges = FsUtils.runInDirectory(libPath, vcs.checkRemoteChanges);
+						final currentRef = FsUtils.runInDirectory(libPath, vcs.getRef);
+						final newRef = hasChanges ? FsUtils.runInDirectory(libPath, vcs.getRemoteRef) : null;
+						{
+							name: name,
+							versionData: versionData,
+							upToDate: !hasChanges,
+							current: shortRef(currentRef),
+							latest: if (newRef != null) shortRef(newRef) else if (hasChanges) "new changes" else null
+						};
+				});
+			} catch (e) {
+				userInterface.log('Could not check $rawName for updates: ' + e.toString(), Optional);
+			}
+		}
+		return result;
+	}
+
 	/**
 		Updates all libraries in the scope.
 
-		If a library update fails, it is skipped.
+		Checks every library first, then asks to confirm each outdated one
+		before installing it - answering "always" (the `a` option `confirm`
+		exposes) accepts that library and every remaining one without asking
+		again. A library that fails to update is skipped, not fatal to the rest.
 	**/
 	public function updateAll():Void {
-		final libraries = scope.getLibraryNames();
-		var updated = false;
+		final updates = checkForUpdates();
+		final outdated = [for (u in updates) if (!u.upToDate) u];
+
+		if (outdated.length == 0) {
+			userInterface.log('All ${updates.length} libraries are already up to date.');
+			return;
+		}
+
+		userInterface.log('${outdated.length} update(s) available:');
+		for (u in outdated) {
+			final label = u.latest != null ? '${u.current} -> ${u.latest}' : u.current;
+			userInterface.log('  ${padName(u.name)}$label');
+		}
+
+		var updatedCount = 0;
+		var skipped = 0;
 		var failures = 0;
 
-		for (library in libraries) {
-			userInterface.log('Checking $library');
-
-			final version = scope.resolve(library);
-			if (isUpToDate(library, version)) {
+		for (u in outdated) {
+			final label = u.latest != null ? '${u.current} -> ${u.latest}' : u.current;
+			if (!userInterface.confirm('Update ${u.name} ($label)')) {
+				++skipped;
 				continue;
 			}
 
 			try {
-				updateResolved(library, version);
-				updated = true;
+				updateResolved(u.name, u.versionData);
+				++updatedCount;
 			} catch (e:UpdateCancelled) {
-				continue;
+				++skipped;
 			} catch (e) {
 				++failures;
-				userInterface.log("Failed to update: " + e.toString());
+				userInterface.log('Failed to update ${u.name}: ' + e.toString());
 				userInterface.log(e.stack.toString(), Debug);
 			}
 		}
 
-		if (updated) {
-			if (failures == 0) {
-				userInterface.log("All libraries are now up-to-date");
-			} else {
-				userInterface.log("All libraries are now up-to-date");
-			}
-		} else
-			userInterface.log("All libraries are already up-to-date");
+		final parts = [];
+		if (updatedCount > 0)
+			parts.push('$updatedCount ${updatedCount == 1 ? "library" : "libraries"} updated');
+		if (skipped > 0)
+			parts.push('$skipped skipped');
+		if (failures > 0)
+			parts.push('$failures failed');
+		userInterface.log(parts.length > 0 ? parts.join(", ") + "." : "No libraries were updated.");
 	}
 
 	function getDependencies(path:String):Dependencies {
