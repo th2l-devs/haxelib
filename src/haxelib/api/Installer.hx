@@ -511,13 +511,26 @@ class Installer {
 	static function padName(name:ProjectName):String
 		return StringTools.rpad(name, " ", 16);
 
+	/** Formats one row of the update report, e.g. `format          3.8.0   up to date`. **/
+	static function formatUpdateRow(u:LibraryUpdateInfo):String {
+		final status = u.upToDate ? "up to date" : '${u.latest} available';
+		return '${padName(u.name)}${u.current}   $status';
+	}
+
 	/**
 		Checks every library in the scope for updates, without installing any.
+
+		Reports each library as it is checked - a "Checking X..." line followed
+		immediately by its result - rather than staying silent until every
+		library has been scanned, since a vcs check can take a while and the
+		caller should see what's actually happening in real time.
 
 		For a vcs install this involves an actual `fetch`/`pull` (there is no
 		way to know if new commits exist otherwise), so it is not free - but it
 		is also the same network cost `updateAll` would pay for that library
-		anyway, just performed up front instead of during the apply step.
+		anyway, just performed up front instead of during the apply step. A
+		private repository may pause here waiting on interactive sign-in (see
+		`getVcs`'s `longTimeout`); that pause is expected, not a hang.
 
 		A library that can't be checked (e.g. network failure) is skipped with
 		a message rather than aborting the whole scan.
@@ -525,10 +538,11 @@ class Installer {
 	public function checkForUpdates():Array<LibraryUpdateInfo> {
 		final result = [];
 		for (rawName in scope.getLibraryNames()) {
+			userInterface.log('Checking $rawName...');
 			try {
 				final versionData = scope.resolve(rawName);
 				final name = getCorrectName(rawName, versionData);
-				result.push(switch versionData {
+				final info:LibraryUpdateInfo = switch versionData {
 					case Haxelib(version):
 						final latest = Connection.getLatestVersion(name);
 						{
@@ -539,7 +553,9 @@ class Installer {
 							latest: version == latest ? null : '$latest'
 						};
 					case VcsInstall(id, _):
-						final vcs = getVcs(id);
+						// a longer timeout: a private repo may need the user to
+						// complete an interactive sign-in in their browser
+						final vcs = getVcs(id, true);
 						final libPath = repository.getVersionPath(name, id);
 						final hasChanges = FsUtils.runInDirectory(libPath, vcs.checkRemoteChanges);
 						final currentRef = FsUtils.runInDirectory(libPath, vcs.getRef);
@@ -551,7 +567,9 @@ class Installer {
 							current: shortRef(currentRef),
 							latest: if (newRef != null) shortRef(newRef) else if (hasChanges) "new changes" else null
 						};
-				});
+				}
+				userInterface.log('  ${formatUpdateRow(info)}');
+				result.push(info);
 			} catch (e) {
 				userInterface.log('Could not check $rawName for updates: ' + e.toString(), Optional);
 			}
@@ -576,11 +594,7 @@ class Installer {
 			return;
 		}
 
-		userInterface.log('${outdated.length} update(s) available:');
-		for (u in outdated) {
-			final label = u.latest != null ? '${u.current} -> ${u.latest}' : u.current;
-			userInterface.log('  ${padName(u.name)}$label');
-		}
+		userInterface.log('${outdated.length} update(s) available.');
 
 		var updatedCount = 0;
 		var skipped = 0;
@@ -944,7 +958,16 @@ class Installer {
 		return ref.length > 7 ? ref.substr(0, 7) : ref;
 	}
 
-	function getVcs(id:VcsID):Vcs {
+	/**
+		Creates a `Vcs` wired to this installer's progress display.
+
+		`longTimeout` widens the stall watchdog (see `Vcs.stallTimeout`) for
+		operations - like a remote-update check - where a long, silent pause can
+		legitimately mean the user is completing an interactive sign-in in their
+		browser rather than a dead connection. `--no-timeout` (`stallTimeout`
+		already `0`, meaning unlimited) always takes precedence over this.
+	**/
+	function getVcs(id:VcsID, longTimeout = false):Vcs {
 		final vcs = Vcs.create(id, userInterface.log.bind(_, Debug), userInterface.log.bind(_, Optional));
 		if (vcs == null || !vcs.available)
 			throw 'Could not use $id, please make sure it is installed and available in your PATH.';
@@ -958,6 +981,8 @@ class Installer {
 		// respect --no-timeout
 		if (!Connection.hasTimeout)
 			vcs.stallTimeout = 0;
+		else if (longTimeout)
+			vcs.stallTimeout = 180;
 		return vcs;
 	}
 

@@ -603,16 +603,16 @@ class Main {
 		installer.update(library);
 	}
 
-	/** Prints the report produced by `Installer.checkForUpdates`. **/
+	/**
+		Prints the closing summary for `Installer.checkForUpdates`.
+
+		Each library's row is already printed live as it's checked (see
+		`Installer.checkForUpdates`) - this only adds the final tally.
+	**/
 	function printUpdateReport(updates:Array<Installer.LibraryUpdateInfo>) {
 		if (updates.length == 0) {
 			Cli.print("No libraries installed.");
 			return;
-		}
-
-		for (u in updates) {
-			final status = if (u.upToDate) "up to date" else '${u.latest} available';
-			Cli.print('  ${StringTools.rpad(u.name, " ", 16)}${u.current}   $status');
 		}
 
 		final outdatedCount = updates.count(u -> !u.upToDate);

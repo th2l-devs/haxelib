@@ -352,6 +352,9 @@ class Cli {
 			return;
 
 		sys.thread.Thread.create(function() {
+			// ticks once per iteration (~0.1s); used to escalate the label below -
+			// separate from spinnerFrameIdx, which only cycles the glyph
+			var elapsedTicks = 0;
 			while (true) {
 				consoleLock.acquire();
 				// re-check under the lock so we never draw after stopSpinner()
@@ -359,9 +362,17 @@ class Cli {
 					consoleLock.release();
 					break;
 				}
-				final frame = frames[spinnerFrameIdx++ % frames.length];
-				drawStatusLine('   ${paint(C_MAGENTA, frame)} $label', 3 + 1 + 1 + label.length);
+				final glyph = frames[spinnerFrameIdx++ % frames.length];
+				// after ~10s with no real progress, this could be a private repo
+				// waiting on interactive sign-in (e.g. a browser device-code
+				// prompt) rather than a dead connection - say so. That prompt is
+				// drawn straight to the console by the credential helper, bypassing
+				// our own output entirely, so this is the closest we can get to
+				// surfacing it ourselves.
+				final text = elapsedTicks < 100 ? label : '$label (if a sign-in window opened, complete it there)';
+				drawStatusLine('   ${paint(C_MAGENTA, glyph)} $text', 3 + 1 + 1 + text.length);
 				consoleLock.release();
+				++elapsedTicks;
 				Sys.sleep(0.1);
 			}
 		});
