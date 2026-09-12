@@ -585,8 +585,9 @@ class Main {
 
 		if (input == null) {
 			if (flags.contains(Check)) {
+				final totalCount = scope.getLibraryNames().length;
 				final updates = installer.checkForUpdates();
-				printUpdateReport(updates);
+				printUpdateReport(totalCount, updates);
 				Sys.exit(updates.exists(u -> !u.upToDate) ? 1 : 0);
 				return;
 			}
@@ -608,18 +609,29 @@ class Main {
 
 		Each library's row is already printed live as it's checked (see
 		`Installer.checkForUpdates`) - this only adds the final tally.
+
+		`totalCount` is the number of libraries actually installed, which can be
+		larger than `updates.length` when some of them failed their check
+		(already reported individually) - that's not the same as "up to date"
+		or "nothing installed", so it gets its own callout.
 	**/
-	function printUpdateReport(updates:Array<Installer.LibraryUpdateInfo>) {
-		if (updates.length == 0) {
+	function printUpdateReport(totalCount:Int, updates:Array<Installer.LibraryUpdateInfo>) {
+		if (totalCount == 0) {
 			Cli.print("No libraries installed.");
 			return;
 		}
 
+		if (updates.length == 0) {
+			Cli.printWarning('Could not check any of the $totalCount installed libraries for updates.');
+			return;
+		}
+
+		final uncheckedSuffix = totalCount > updates.length ? ' (${totalCount - updates.length} could not be checked.)' : '';
 		final outdatedCount = updates.count(u -> !u.upToDate);
 		if (outdatedCount == 0)
-			Cli.print('All ${updates.length} libraries are up to date.');
+			Cli.print('All ${updates.length} checked libraries are up to date.$uncheckedSuffix');
 		else
-			Cli.printWarning('$outdatedCount update(s) available. Run `haxelib update` to install ${outdatedCount == 1 ? "it" : "them"}.');
+			Cli.printWarning('$outdatedCount update(s) available. Run `haxelib update` to install ${outdatedCount == 1 ? "it" : "them"}.$uncheckedSuffix');
 	}
 
 	function remove() {

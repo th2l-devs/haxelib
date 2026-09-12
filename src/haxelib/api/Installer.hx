@@ -570,6 +570,8 @@ class Installer {
 				}
 				userInterface.log('  ${formatUpdateRow(info)}');
 				result.push(info);
+			} catch (e:VcsError) {
+				userInterface.log('Could not check $rawName for updates: ' + describeVcsError(e), Optional);
 			} catch (e) {
 				userInterface.log('Could not check $rawName for updates: ' + e.toString(), Optional);
 			}
@@ -586,15 +588,25 @@ class Installer {
 		again. A library that fails to update is skipped, not fatal to the rest.
 	**/
 	public function updateAll():Void {
+		final totalCount = scope.getLibraryNames().length;
 		final updates = checkForUpdates();
-		final outdated = [for (u in updates) if (!u.upToDate) u];
 
-		if (outdated.length == 0) {
-			userInterface.log('All ${updates.length} libraries are already up to date.');
+		if (updates.length == 0) {
+			userInterface.log('Could not check any of the $totalCount installed libraries for updates.');
 			return;
 		}
 
-		userInterface.log('${outdated.length} update(s) available.');
+		final outdated = [for (u in updates) if (!u.upToDate) u];
+		// libraries whose check itself failed (already reported individually
+		// above) - don't call them "up to date", they're simply unknown
+		final uncheckedSuffix = totalCount > updates.length ? ' (${totalCount - updates.length} could not be checked.)' : '';
+
+		if (outdated.length == 0) {
+			userInterface.log('All ${updates.length} checked libraries are already up to date.$uncheckedSuffix');
+			return;
+		}
+
+		userInterface.log('${outdated.length} update(s) available.$uncheckedSuffix');
 
 		var updatedCount = 0;
 		var skipped = 0;
@@ -959,6 +971,31 @@ class Installer {
 	}
 
 	/**
+		Short, user-facing message for a `VcsError`.
+
+		Never calls the enum's default `toString()` on it: `VcsError` carries a
+		`Vcs` instance in most of its cases, and stringifying that dumps every
+		field of the object (including function-pointer fields like
+		`progressOutput`) - a wall of noise instead of the actual git/hg error.
+	**/
+	static function describeVcsError(e:VcsError):String {
+		return switch e {
+			case VcsUnavailable(vcs):
+				'could not use ${vcs.executable} - please make sure it is installed and available in your PATH.';
+			case CommandTimedOut(_, seconds):
+				'no response for ${seconds}s.';
+			case CommandFailed(_, code, _, stderr):
+				stderr != null && stderr != "" ? stderr : 'command failed (exit code $code).';
+			case CantCloneRepo(_, _, stderr):
+				'could not clone' + (stderr != null && stderr != "" ? ":\n" + stderr : ".");
+			case CantCheckout(_, ref, stderr):
+				'could not checkout "$ref": $stderr';
+			case SubmoduleError(_, repo, stderr):
+				'could not clone submodule(s) from $repo: $stderr';
+		};
+	}
+
+	/**
 		Creates a `Vcs` wired to this installer's progress display.
 
 		`longTimeout` widens the stall watchdog (see `Vcs.stallTimeout`) for
@@ -1090,15 +1127,7 @@ class Installer {
 						userInterface.log('Library $library version $id already up to date (${shortRef(ref)})');
 					}
 				} catch (e:VcsError) {
-					switch (e) {
-						case CommandTimedOut(_, seconds):
-							throw 'Could not reach the ${id.getName()} repository for $library (no response for ${seconds}s).';
-						case CommandFailed(_, _, _, stderr):
-							throw 'Could not check for updates to $library:\n'
-								+ (stderr != null && stderr != "" ? stderr : "the repository could not be reached.");
-						default:
-							throw 'Could not update $library from its ${id.getName()} repository.';
-					}
+					throw 'Could not check for updates to $library: ' + describeVcsError(e);
 				}
 			}
 		} else {

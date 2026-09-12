@@ -458,14 +458,26 @@ class Cli {
 
 	static var gitBuf = "";
 	static var gitStart = -1.0;
+	static var gitProgressSeen = false;
 	static final gitPhaseEReg = ~/(Receiving objects|Resolving deltas|Compressing objects|Counting objects):\s+(\d+)% \((\d+)\/(\d+)\)/;
 
 	public static function printVcsProgress(chunk:String) {
 		if (gitStart < 0) {
 			gitStart = haxe.Timer.stamp();
+			gitProgressSeen = false;
+			final startedAt = gitStart;
 			// git goes silent while the server builds the pack - spin until it
-			// starts reporting real progress, so it doesn't look frozen
-			startSpinner("Waiting for remote...");
+			// starts reporting real progress, so it doesn't look frozen. But a
+			// check against an already up-to-date repo can finish almost
+			// instantly (there's nothing to fetch), so wait a beat before
+			// showing anything - otherwise that case just flashes something on
+			// screen for a few milliseconds and erases it, which reads as a
+			// glitch rather than useful feedback.
+			sys.thread.Thread.create(function() {
+				Sys.sleep(0.3);
+				if (gitStart == startedAt && !gitProgressSeen)
+					startSpinner("Waiting for remote...");
+			});
 		}
 		gitBuf += chunk;
 		// git separates progress updates with \r and finished lines with \n
@@ -486,6 +498,7 @@ class Cli {
 		final pct = Std.parseInt(gitPhaseEReg.matched(2));
 		if (pct == null)
 			return;
+		gitProgressSeen = true; // cancels the delayed spinner if it hasn't shown yet
 		final phase = gitPhaseEReg.matched(1);
 		final label = switch phase {
 			case "Receiving objects": "Receiving";
