@@ -978,6 +978,17 @@ class Installer {
 		field of the object (including function-pointer fields like
 		`progressOutput`) - a wall of noise instead of the actual git/hg error.
 	**/
+	static function tokenHint(url:Null<String>, e:VcsError):String {
+		if (url == null || !~/^https?:\/\/[^\/@\s]+@/.match(url))
+			return "";
+		final text = describeVcsError(e).toLowerCase();
+		if (text.indexOf("not found") < 0 && text.indexOf("authentication") < 0 && text.indexOf("could not read username") < 0
+			&& text.indexOf("terminal prompts disabled") < 0 && text.indexOf("403") < 0 && text.indexOf("401") < 0)
+			return "";
+		return "\nThe access token in the url was rejected: it is expired, revoked, or has no access to this repository. "
+			+ "GitHub revokes tokens automatically when they are pushed to a public repository.";
+	}
+
 	static function describeVcsError(e:VcsError):String {
 		return switch e {
 			case VcsUnavailable(vcs):
@@ -1025,6 +1036,11 @@ class Installer {
 
 	function installVcs(library:ProjectName, id:VcsID, vcsData:VcsData) {
 		final vcs = getVcs(id);
+		if (vcsData.url != null && ~/^https?:\/\/[^\/@\s]+@/.match(vcsData.url)) {
+			Sys.putEnv("GIT_TERMINAL_PROMPT", "0");
+			Sys.putEnv("GCM_INTERACTIVE", "never");
+			Sys.putEnv("GIT_ASKPASS", "");
+		}
 
 		final libPath = repository.getVersionPath(library, id);
 
@@ -1047,7 +1063,7 @@ class Installer {
 						case VcsUnavailable(vcs):
 							throw 'Could not use ${vcs.executable}, please make sure it is installed and available in your PATH.';
 						case CantCloneRepo(_, _, stderr):
-							throw 'Could not clone ${id.getName()} repository' + (stderr != null ? ":\n" + stderr : ".");
+							throw 'Could not clone ${id.getName()} repository' + (stderr != null ? ":\n" + stderr : ".") + tokenHint(vcsData.url, error);
 						case CantCheckout(_, ref, stderr):
 							throw 'Could not checkout commit or tag "$ref": ' + stderr;
 						case SubmoduleError(_, repo, stderr):
@@ -1134,7 +1150,7 @@ class Installer {
 						userInterface.log('Library $library version $id already up to date (${shortRef(ref)})');
 					}
 				} catch (e:VcsError) {
-					throw 'Could not check for updates to $library: ' + describeVcsError(e);
+					throw 'Could not check for updates to $library: ' + describeVcsError(e) + tokenHint(vcsData.url, e);
 				}
 			}
 		} else {
