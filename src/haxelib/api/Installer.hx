@@ -1112,6 +1112,13 @@ class Installer {
 				// rejected, repo moved/deleted); surface that cleanly instead of
 				// dumping the raw VcsError enum.
 				try {
+					if (vcsData.url != null && vcsData.url != "") {
+						final origin = FsUtils.runInDirectory(libPath, vcs.getOriginUrl);
+						if (origin != vcsData.url) {
+							userInterface.log('Remote url of $library changed, switching the install to the new one');
+							FsUtils.runInDirectory(libPath, () -> vcs.setOriginUrl(vcsData.url));
+						}
+					}
 					if (!wasUpdated && FsUtils.runInDirectory(libPath, vcs.checkRemoteChanges)) {
 						// report which commit we're moving to before pulling it in
 						final oldRef = FsUtils.runInDirectory(libPath, vcs.getRef);

@@ -72,6 +72,8 @@ private interface IVcs {
 
 	function getOriginUrl():String;
 
+	function setOriginUrl(url:String):Void;
+
 	function getBranchName():Null<String>;
 }
 
@@ -550,6 +552,10 @@ class Git extends Vcs {
 		return run(["ls-remote", "--get-url", "origin"], true).out.trim();
 	}
 
+	public function setOriginUrl(url:String):Void {
+		run(["remote", "set-url", "origin", url], true);
+	}
+
 	public function getBranchName():Null<String> {
 		final ret = run(["symbolic-ref", "--short", "HEAD"]);
 		if (ret.code != 0)
@@ -661,6 +667,16 @@ class Mercurial extends Vcs {
 		if (ret.code == 0)
 			return ret.out.trim();
 		return run(["paths", "haxelib_url"], true).out.trim();
+	}
+
+	public function setOriginUrl(url:String):Void {
+		final rcFile = '.hg/hgrc';
+		if (!FileSystem.exists(rcFile))
+			return;
+		final content = sys.io.File.getContent(rcFile);
+		final updated = ~/^default\s*=.*$/m.replace(content, 'default = $url');
+		if (updated != content)
+			sys.io.File.saveContent(rcFile, updated);
 	}
 
 	public function getBranchName():Null<String> {
